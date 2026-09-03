@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Модели — AI Monitoring Proxy{% endblock %}
+
+{% block content %}
+<h1>Модели</h1>
+<p class="subtle small" style="margin-top:-8px">
+  Отсортированы по количеству запросов за всё время. Нажмите на модель, чтобы открыть лог с фильтром.
+</p>
+
+<div class="filters">
+  <input type="search" id="m-search" placeholder="Поиск по названию модели…">
+  <div class="spacer"></div>
+  <span class="small subtle" id="m-summary"></span>
+</div>
+
+<section class="card">
+  <table>
+    <colgroup>
+      <col style="width:44px"><col><col style="width:150px"><col style="width:110px">
+      <col style="width:130px"><col style="width:120px"><col style="width:110px"><col style="width:150px">
+    </colgroup>
+    <thead>
+      <tr>
+        <th></th><th>Модель</th><th class="right">Запросов</th><th class="right">Ошибок</th>
+        <th class="right">Токены (in/out)</th><th class="right">Стоимость</th>
+        <th class="right">Ср. время</th><th class="right">Последний запрос</th>
+      </tr>
+    </thead>
+    <tbody id="models-body"><tr><td colspan="8" class="empty">Загрузка…</td></tr></tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block scripts %}<script src="/static/models.js?v={{ v }}"></script>{% endblock %}

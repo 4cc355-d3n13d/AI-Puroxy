@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ page.title }} — документация{% endblock %}
+
+{% block content %}
+<div class="docs-layout">
+  <nav class="docs-side">
+    {% for section, items in sections %}
+      {% set section_pages = pages | selectattr('section', 'equalto', section) | list %}
+      {% if section_pages %}
+      <div class="group">
+        <div class="group-title">{{ section }}</div>
+        {% for item in section_pages %}
+          <a href="/docs/{{ item.slug }}" class="{{ 'is-active' if item.slug == page.slug }}">{{ item.title }}</a>
+        {% endfor %}
+      </div>
+      {% endif %}
+    {% endfor %}
+  </nav>
+
+  <article class="docs-body">
+    <div class="docs-head">
+      {% if page.ref %}<span class="tag accent mono">{{ page.ref }}</span>{% endif %}
+      <span class="docs-domain-note">домен примеров: <b>{{ domain }}</b> — меняется в <a href="/settings">настройках</a></span>
+    </div>
+    {{ page.html | safe }}
+  </article>
+
+  <nav class="docs-toc">
+    <div class="docs-toc-title">На странице</div>
+    {% for item in page.toc %}
+      <a href="#{{ item.anchor }}" class="lvl-{{ item.level }}">{{ item.text }}</a>
+    {% endfor %}
+  </nav>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/docs.js?v={{ v }}"></script>{% endblock %}

@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Баланс — AI Monitoring Proxy{% endblock %}
+
+{% block content %}
+<div class="stats" id="balance-stats"></div>
+
+<div class="balance-grid">
+  <section class="card">
+    <div class="cal-head">
+      <button class="ghost" id="prev-month" title="Предыдущий месяц">←</button>
+      <span class="cal-month" id="cal-month">—</span>
+      <button class="ghost" id="next-month" title="Следующий месяц">→</button>
+      <button class="ghost" id="this-month">Текущий</button>
+      <div class="spacer"></div>
+      <span class="small subtle" id="cal-total"></span>
+    </div>
+    <div class="cal-weekdays">
+      <div>пн</div><div>вт</div><div>ср</div><div>чт</div><div>пт</div><div>сб</div><div>вс</div>
+    </div>
+    <div class="cal-grid" id="cal-grid"></div>
+    <div class="cal-legend">
+      <span>меньше</span>
+      <span class="cal-scale">
+        <i style="opacity:.18"></i><i style="opacity:.4"></i><i style="opacity:.6"></i><i style="opacity:.8"></i><i></i>
+      </span>
+      <span>больше трат за день</span>
+      <div class="spacer"></div>
+      <button class="ghost" id="refresh-balance">Обновить баланс</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title" id="day-title">Детализация</span>
+      <div class="spacer"></div>
+      <a class="small" id="day-log-link" href="/monitor">лог за день →</a>
+    </div>
+    <div class="daylist" id="day-detail"><div class="empty">Выберите день в календаре</div></div>
+  </section>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/balance.js?v={{ v }}"></script>{% endblock %}

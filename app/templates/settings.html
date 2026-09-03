@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Настройки — AI Monitoring Proxy{% endblock %}
+
+{% block content %}
+<h1>Настройки прокси</h1>
+{% if saved %}<div class="banner-ok">Настройки сохранены.</div>{% endif %}
+
+<div class="settings-grid">
+  <section class="card">
+    <div class="card-body">
+      <form method="post" action="/settings" class="form-rows">
+        <label class="field">
+          API-ключ ИИ-API
+          <input type="password" name="api_key" autocomplete="off" spellcheck="false"
+                 placeholder="{{ masked_key or 'sk-…' }}">
+          <span class="hint">
+            {% if cfg.api_key %}Сейчас сохранён ключ <code>{{ masked_key }}</code>. Оставьте поле пустым, чтобы не менять его.
+            {% else %}Ключ подставляется в заголовок <code>Authorization: Bearer …</code> ко всем проксируемым запросам.{% endif %}
+          </span>
+        </label>
+
+        <label class="field">
+          Base URL ИИ-API
+          <input type="text" name="base_url" value="{{ cfg.base_url }}" spellcheck="false" placeholder="https://api.example.com/api">
+          <span class="hint">Без завершающего слэша. Пути документации добавляются как <code>/v1/…</code>.</span>
+        </label>
+
+        <label class="field">
+          Количество хранимых дней
+          <input type="number" name="retention_days" min="0" step="1" value="{{ cfg.retention_days }}">
+          <span class="hint">Записи старше указанного числа дней удаляются. <b>0</b> — хранить всё.</span>
+        </label>
+
+        <label class="field">
+          Порог остатка баланса, ₽
+          <input type="text" inputmode="decimal" name="balance_threshold" value="{{ '%g'|format(cfg.balance_threshold) }}">
+          <span class="hint">
+            Если баланс опустится ниже порога, в начало текстовых ответов будет добавляться предупреждение
+            с суммой остатка. <b>0</b> — выключено.
+          </span>
+        </label>
+
+        <label class="field">
+          Домен сайта для документации
+          <input type="text" name="docs_domain" value="{{ cfg.docs_domain }}" spellcheck="false" placeholder="localhost:8787">
+          <span class="hint">Подставляется вместо <code>speshu.ai</code> в примерах на странице <a href="/docs">/docs</a>.</span>
+        </label>
+
+        <label class="field">
+          Интервал опроса баланса, сек
+          <input type="number" name="balance_poll_seconds" min="30" step="10" value="{{ cfg.balance_poll_seconds }}">
+          <span class="hint">Как часто прокси сам запрашивает <code>/v1/balance</code> для графика и предупреждений.</span>
+        </label>
+
+        <div class="form-actions">
+          <button type="submit" class="primary">Сохранить</button>
+          <a class="btn" href="/monitor">К логу</a>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <aside class="card">
+    <div class="card-head"><span class="card-title">Состояние</span></div>
+    <div class="card-body">
+      <div class="kv"><span>Статус</span>
+        <b>{% if configured %}<span class="tag ok">настроен</span>{% else %}<span class="tag err">не настроен</span>{% endif %}</b></div>
+      <div class="kv"><span>Запросов в базе</span><b class="num">{{ overview.requests }}</b></div>
+      <div class="kv"><span>Моделей</span><b class="num">{{ overview.models }}</b></div>
+      <div class="kv"><span>Файл базы</span><b class="mono small">{{ db_path }}</b></div>
+      <div class="kv"><span>Размер базы</span><b class="num" id="db-size" data-bytes="{{ db_size }}">{{ db_size }} Б</b></div>
+      <div class="kv"><span>Хранение</span>
+        <b>{% if cfg.retention_days %}{{ cfg.retention_days }} дн.{% else %}без ограничений{% endif %}</b></div>
+    </div>
+    <div class="card-head" style="border-top:1px solid var(--border)"><span class="card-title">Как подключиться</span></div>
+    <div class="card-body small">
+      <p class="subtle" style="margin-top:0">Замените базовый URL в своём клиенте — ключ подставит прокси:</p>
+      <pre class="mono" style="background:var(--surface-2);padding:10px;border-radius:6px;overflow:auto">curl http://localhost:8787/v1/models</pre>
+      <p class="subtle">Совместимы оба префикса: <code>/v1/…</code> и <code>/api/v1/…</code>.</p>
+    </div>
+  </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const sizeNode = document.getElementById('db-size');
+  sizeNode.textContent = fmtBytes(Number(sizeNode.dataset.bytes));
+</script>
+{% endblock %}

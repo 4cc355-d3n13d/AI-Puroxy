@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Лог запросов — AI Monitoring Proxy{% endblock %}
+
+{% block content %}
+<section class="card chart-card" id="chart-card">
+  <div class="card-head">
+    <span class="card-title">Запросы по дням</span>
+    <span class="subtle small" id="chart-summary"></span>
+    <div class="spacer"></div>
+    <select id="chart-days" title="Период графика">
+      <option value="14">14 дней</option>
+      <option value="30" selected>30 дней</option>
+      <option value="60">60 дней</option>
+      <option value="90">90 дней</option>
+    </select>
+    <button class="ghost" id="chart-toggle" title="Свернуть график">Свернуть</button>
+  </div>
+  <div class="chart-body" id="chart"></div>
+</section>
+
+<div class="stats" id="stats"></div>
+
+<div class="filters">
+  <input type="search" id="f-q" placeholder="Поиск по телу запроса/ответа…">
+  <select id="f-model"><option value="">Все модели</option></select>
+  <select id="f-endpoint"><option value="">Все эндпоинты</option></select>
+  <select id="f-status">
+    <option value="">Любой статус</option>
+    <option value="ok">Только успешные</option>
+    <option value="error">Только ошибки</option>
+  </select>
+  <select id="f-kind" title="Что было в запросе">
+    <option value="">Любые запросы</option>
+    <option value="tools">🔧 с инструментами</option>
+    <option value="reasoning">💭 с рассуждениями</option>
+    <option value="images">🖼 с изображениями</option>
+    <option value="stream">⚡ потоковые</option>
+  </select>
+  <input type="date" id="f-from" title="Дата с">
+  <input type="date" id="f-to" title="Дата по">
+  <select id="f-size">
+    <option value="25">25</option>
+    <option value="50" selected>50</option>
+    <option value="100">100</option>
+    <option value="200">200</option>
+  </select>
+  <button class="ghost" id="f-reset">Сбросить</button>
+  <div class="spacer"></div>
+  <label class="small subtle" style="display:flex;align-items:center;gap:6px">
+    <input type="checkbox" id="auto-refresh" checked style="min-width:auto"> автообновление
+  </label>
+</div>
+
+<section class="card">
+  <table class="log-table">
+    <colgroup>
+      <col style="width:118px"><col style="width:180px"><col style="width:62px">
+      <col style="width:74px"><col style="width:104px"><col style="width:92px"><col>
+    </colgroup>
+    <thead>
+      <tr>
+        <th>Время</th><th>Модель</th><th class="right">Статус</th>
+        <th class="right">Время</th><th class="right">Токены</th>
+        <th class="right">Стоимость</th><th>Что происходило</th>
+      </tr>
+    </thead>
+    <tbody id="log-body"><tr><td colspan="9" class="empty">Загрузка…</td></tr></tbody>
+  </table>
+  <div class="pager">
+    <button id="prev" class="ghost">← Назад</button>
+    <span class="small subtle" id="page-info"></span>
+    <button id="next" class="ghost">Вперёд →</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}<script src="/static/monitor.js?v={{ v }}"></script>{% endblock %}
