@@ -3,3 +3,8 @@ data/
 __pycache__/
 *.pyc
 .DS_Store
+*.log
+*.duckdb*
+*.wal
+*.json
+config.*
