@@ -87,3 +87,37 @@ async function restart(button) {
 
 const restartButton = document.getElementById('restart-btn');
 if (restartButton) restartButton.addEventListener('click', () => restart(restartButton));
+
+/* ---------------------------------------------------------------- оформление: предпросмотр */
+
+const brandPreview = {
+  name: document.getElementById('preview-name'),
+  mark: document.getElementById('preview-mark'),
+  logo: document.getElementById('preview-logo'),
+  saved: document.getElementById('preview-logo').getAttribute('src'),
+};
+
+function renderBrandPreview() {
+  const name = document.getElementById('brand-name').value.trim() || 'Monitoring Proxy';
+  const mark = document.getElementById('brand-mark').value.replace(/\s+/g, '').slice(0, 3);
+  const remove = document.getElementById('logo-remove');
+  const hasLogo = !!brandPreview.logo.getAttribute('src') && !(remove && remove.checked && !brandPreview.picked);
+  brandPreview.name.textContent = name;
+  brandPreview.mark.textContent = mark;
+  brandPreview.logo.hidden = !hasLogo;
+  brandPreview.mark.hidden = hasLogo || !mark;
+}
+
+document.getElementById('brand-name').addEventListener('input', renderBrandPreview);
+document.getElementById('brand-mark').addEventListener('input', renderBrandPreview);
+if (document.getElementById('logo-remove')) {
+  document.getElementById('logo-remove').addEventListener('change', renderBrandPreview);
+}
+document.getElementById('logo-input').addEventListener('change', (event) => {
+  const file = event.target.files[0];
+  if (brandPreview.picked) URL.revokeObjectURL(brandPreview.picked);
+  brandPreview.picked = file ? URL.createObjectURL(file) : null;
+  brandPreview.logo.src = brandPreview.picked || brandPreview.saved || '';
+  if (!brandPreview.picked && !brandPreview.saved) brandPreview.logo.removeAttribute('src');
+  renderBrandPreview();
+});

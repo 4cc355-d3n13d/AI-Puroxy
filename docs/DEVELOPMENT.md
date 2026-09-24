@@ -92,7 +92,7 @@ AI_PROXY_HOST=0.0.0.0 ./run.sh  # разово доступ из локальн�
 конфигурации, id, активный), режимы стоимости и пересчёт истории, миграция старых записей,
 извлечение медиа из всех форматов, галерея, ретеншен файлов и `backfill_media`.
 
-`test_web.py` — 40 проверок. Поднимает приложение через `TestClient` и дёргает каждую
+`test_web.py` — 49 проверок. Поднимает приложение через `TestClient` и дёргает каждую
 страницу, каждую страницу `/docs` и все `/_api/*`; проверяет форму источников,
 предупреждение о перезапуске, `409` у `/_api/restart` без сервиса и защиту `/_media/`. `DeprecationWarning` там возведён
 в ошибку — без этого устаревшие вызовы живут незамеченными, пока библиотека их терпит,
@@ -222,7 +222,7 @@ curl --noproxy '*' http://<адрес>:9090/monitor     # с другой маш
 
 ```
 app/
-  main.py config.py db.py proxy.py usage.py stats.py docsrc.py inspect.py media.py __main__.py
+  main.py config.py db.py proxy.py usage.py stats.py docsrc.py inspect.py media.py brand.py __main__.py
   docs/        исходные .md документации ИИ-API (отдаются на /docs)
   templates/   Jinja2-шаблоны
   static/      CSS и JS без внешних зависимостей

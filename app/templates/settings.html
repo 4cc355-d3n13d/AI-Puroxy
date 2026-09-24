@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Настройки — AI Monitoring Proxy{% endblock %}
+{% block title %}Настройки{% endblock %}
 
 {% block content %}
 <h1>Настройки прокси</h1>
-{% if saved %}<div class="banner-ok">Настройки сохранены.</div>{% endif %}
+{% if error %}<div class="banner-err">{{ error }} Остальные настройки сохранены.</div>
+{% elif saved %}<div class="banner-ok">Настройки сохранены.</div>{% endif %}
 
 {% if restart_needed %}
 <div class="banner-restart" id="restart-banner">
@@ -23,7 +24,7 @@
 </div>
 {% endif %}
 
-<form method="post" action="/settings" class="settings-grid" id="settings-form">
+<form method="post" action="/settings" class="settings-grid" id="settings-form" enctype="multipart/form-data">
   <div class="settings-main">
     <section class="card">
       <div class="card-head">
@@ -126,6 +127,41 @@
           {% if listen_port %}Сейчас слушает <code>{{ listen_host or '…' }}:{{ listen_port }}</code>.{% endif %}
           Интерфейс работает без аутентификации: открыв доступ из сети, вы открываете и API-ключ.
         </span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span class="card-title">Оформление</span></div>
+      <div class="card-body form-rows">
+        <div class="brand-edit">
+          <div class="brand-preview" id="brand-preview" title="Так выглядит в шапке">
+            <img class="brand-logo" id="preview-logo" src="{{ logo_url or '' }}" alt="" {% if not logo_url %}hidden{% endif %}>
+            <span class="brand-mark" id="preview-mark" {% if logo_url or not cfg.brand_mark %}hidden{% endif %}>{{ cfg.brand_mark }}</span>
+            <span class="brand-text" id="preview-name">{{ cfg.brand_name }}</span>
+          </div>
+          <div class="field-pair">
+            <label class="field">
+              Название
+              <input type="text" name="brand_name" id="brand-name" maxlength="60" value="{{ cfg.brand_name }}" placeholder="Monitoring Proxy">
+            </label>
+            <label class="field">
+              Буквы в плашке
+              <input type="text" name="brand_mark" id="brand-mark" maxlength="3" value="{{ cfg.brand_mark }}" placeholder="AI">
+            </label>
+          </div>
+        </div>
+        <span class="hint">Название видно в шапке и в заголовке вкладки. Буквы показываются в плашке, пока нет логотипа; пусто — без плашки.</span>
+
+        <label class="field">
+          Логотип
+          <input type="file" name="logo" id="logo-input" accept="image/png,image/jpeg,image/webp,image/gif,image/svg+xml">
+          <span class="hint">PNG, JPG, WebP, GIF или SVG до 1 МБ; лучше квадратный. Заменяет плашку в шапке и иконку вкладки.</span>
+        </label>
+        {% if logo_url %}
+        <label class="check">
+          <input type="checkbox" name="logo_remove" value="1" id="logo-remove"> Удалить логотип — вернуть плашку с буквами
+        </label>
+        {% endif %}
       </div>
     </section>
 

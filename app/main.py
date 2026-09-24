@@ -7,6 +7,7 @@ import os
 import signal
 import sys
 from datetime import date
+from urllib.parse import quote
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import config, db, docsrc, media, proxy, stats
+from . import brand, config, db, docsrc, media, proxy, stats
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -98,6 +99,9 @@ def _page_context(request: Request, active: str) -> dict[str, Any]:
         "sources": cfg["sources"],
         "source_names": {s["id"]: s["name"] for s in cfg["sources"]},
         "active_source_name": source["name"] if source else "",
+        "brand_name": cfg["brand_name"],
+        "brand_mark": cfg["brand_mark"],
+        "logo_url": brand.logo_url(cfg),
         "v": _static_version(),
     }
 
@@ -187,7 +191,7 @@ async def models_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
+async def settings_page(request: Request, saved: int = 0, error: str = "") -> HTMLResponse:
     cfg = config.load()
     listen_host, listen_port = _listen_address(request)
     context = _page_context(request, "settings")
@@ -205,6 +209,7 @@ async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
             ),
             "can_restart": _can_restart(),
             "saved": bool(saved),
+            "error": error[:300],
             "db_path": str(config.DB_PATH),
             "db_size": stats.db_size_bytes(),
             "overview": stats.overview(),
@@ -220,9 +225,20 @@ async def settings_save(request: Request) -> Response:
     values: dict[str, Any] = {
         key: str(form.get(key) or "").strip()
         for key in ("retention_days", "balance_threshold", "docs_domain", "balance_poll_seconds",
-                    "host", "port", "cost_mode")
+                    "host", "port", "cost_mode", "brand_name", "brand_mark")
         if key in form
     }
+    error = ""
+    upload = form.get("logo")
+    if form.get("logo_remove"):
+        brand.remove_logo()
+        values["logo_file"] = ""
+    elif upload is not None and getattr(upload, "filename", ""):
+        try:
+            values["logo_file"] = brand.save_logo(await upload.read(brand.MAX_LOGO_BYTES + 1))
+        except brand.LogoError as exc:
+            # остальные поля всё равно сохраняем — не терять введённое из-за картинки
+            error = str(exc)
     if "src_url" in form:
         values.update(_sources_from_form(form, current))
     elif "base_url" in form or "api_key" in form:
@@ -238,6 +254,8 @@ async def settings_save(request: Request) -> Response:
     docsrc._raw.cache_clear()
     if config.is_configured():
         await proxy.fetch_balance(force=True)
+    if error:
+        return RedirectResponse(f"/settings?saved=1&error={quote(error)}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 
@@ -397,6 +415,19 @@ async def media_file(name: str) -> Response:
     # имя — хэш содержимого, поэтому файл по этому адресу никогда не меняется
     return FileResponse(path, media_type=media.mime_of_file(name),
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/_brand/{name}")
+async def brand_file(name: str) -> Response:
+    path = brand.logo_path(name)
+    if path is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # SVG может содержать скрипты: при открытии напрямую запрещаем их выполнение
+    return FileResponse(path, media_type=brand.MIME[path.suffix[1:]], headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        "X-Content-Type-Options": "nosniff",
+    })
 
 
 @app.post("/_api/restart")

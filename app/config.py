@@ -24,6 +24,7 @@ DATA_DIR = Path(os.environ.get("AI_PROXY_DATA_DIR") or (BASE_DIR / "data"))
 CONFIG_PATH = DATA_DIR / "config.json"
 DB_PATH = DATA_DIR / "proxy.duckdb"
 MEDIA_DIR = DATA_DIR / "media"
+BRAND_DIR = DATA_DIR / "brand"
 
 DEFAULT_BASE_URL = "https://speshu.ai/api"
 
@@ -52,6 +53,11 @@ DEFAULTS: dict[str, Any] = {
     "docs_domain": "localhost",
     # Как часто опрашивать баланс апстрима, секунд
     "balance_poll_seconds": 300,
+    # Оформление: название в шапке и заголовке вкладки, буквы в плашке без логотипа
+    "brand_name": "Monitoring Proxy",
+    "brand_mark": "AI",
+    # Имя загруженного логотипа в data/brand/ (logo.png и т.п.); пусто — плашка с буквами
+    "logo_file": "",
 }
 
 # производные поля — в файл не пишутся
@@ -135,6 +141,10 @@ def _coerce(raw: dict[str, Any]) -> dict[str, Any]:
     cfg["balance_poll_seconds"] = max(30, cfg["balance_poll_seconds"])
     cfg["docs_domain"] = cfg["docs_domain"] or DEFAULTS["docs_domain"]
     cfg["host"] = cfg["host"] or DEFAULTS["host"]
+    cfg["brand_name"] = " ".join(cfg["brand_name"].split())[:60] or DEFAULTS["brand_name"]
+    cfg["brand_mark"] = "".join(cfg["brand_mark"].split())[:3]
+    if not re.fullmatch(r"logo\.(png|jpg|webp|gif|svg)", cfg["logo_file"]):
+        cfg["logo_file"] = ""
     if not 1 <= cfg["port"] <= 65535:
         cfg["port"] = DEFAULTS["port"]
     if cfg["cost_mode"] not in COST_MODES:

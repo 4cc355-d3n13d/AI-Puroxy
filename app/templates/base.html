@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}AI Monitoring Proxy{% endblock %}</title>
+  <title>{% block title %}{% endblock %}{% if self.title() %} — {% endif %}{{ brand_name }}</title>
   <script>
     /* тема до загрузки CSS — иначе тёмная страница мелькает светлой при каждом переходе */
     try {
@@ -12,13 +12,15 @@
     } catch (error) { /* хранилище недоступно — остаётся системная тема */ }
   </script>
   <link rel="stylesheet" href="/static/app.css?v={{ v }}">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+  {% if logo_url %}<link rel="icon" href="{{ logo_url }}">
+  {% else %}<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">{% endif %}
 </head>
 <body data-page="{{ active }}">
 <header class="topbar">
-  <a class="brand" href="/">
-    <span class="brand-mark">AI</span>
-    <span class="brand-text">Monitoring&nbsp;Proxy</span>
+  <a class="brand" href="/" title="{{ brand_name }}">
+    {% if logo_url %}<img class="brand-logo" src="{{ logo_url }}" alt="">
+    {% elif brand_mark %}<span class="brand-mark">{{ brand_mark }}</span>{% endif %}
+    <span class="brand-text">{{ brand_name }}</span>
   </a>
   <nav class="nav">
     <a href="/monitor" class="{{ 'is-active' if active == 'monitor' }}">Лог</a>

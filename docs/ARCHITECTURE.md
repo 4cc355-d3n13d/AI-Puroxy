@@ -38,6 +38,7 @@ JS и CSS отдаются с диска, графики рисуются инл
 | `app/inspect.py`| Разбор тел: диалог, рассуждения, вызовы инструментов, токены, картинки            |
 | `app/media.py`  | Медиа из тел: base64 → файлы в `data/media/`, учёт ссылок для галереи             |
 | `app/__main__.py`| Запуск `python -m app` с адресом и портом из настроек                           |
+| `app/brand.py`  | Логотип: проверка по содержимому, хранение в `data/brand/`                        |
 
 Зависимости между модулями односторонние: `main → {proxy, stats, docsrc, config, db, media}`,
 `proxy → {config, db, media, usage}`, `stats → {db, inspect}`, `usage → db`,

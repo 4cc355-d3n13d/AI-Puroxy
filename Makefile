@@ -75,11 +75,12 @@ config: ## показать настройки (ключи замаскиров�
 	[d.pop(k) for k in ('api_key', 'base_url', 'source')]; \
 	print(json.dumps(d, ensure_ascii=False, indent=2))"
 
-backup: ## копия базы, настроек и картинок в data/backup-<время>/ (сервис на время копирования останавливается)
+backup: ## копия базы, настроек, картинок и логотипа в data/backup-<время>/ (сервис на время копирования останавливается)
 	@dir=data/backup-$$(date +%Y%m%d-%H%M%S); \
 	running=$$(./service.sh status 2>/dev/null | grep '^Сервис:' | grep -vq 'не загружен' && echo 1); \
 	[ -z "$$running" ] || ./service.sh stop; \
 	mkdir -p $$dir && cp data/proxy.duckdb* data/config.json $$dir/ 2>/dev/null; \
 	[ ! -d data/media ] || cp -R data/media $$dir/; \
+	[ ! -d data/brand ] || cp -R data/brand $$dir/; \
 	[ -z "$$running" ] || ./service.sh start; \
 	echo "→ сохранено в $$dir"

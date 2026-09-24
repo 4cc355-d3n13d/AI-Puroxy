@@ -150,6 +150,38 @@ with TestClient(app) as client:
         sys.argv = saved_argv
     check(config.load()["host"] == "127.0.0.1", "сохранённый адрес не перезаписывается")
 
+    print("оформление: название и логотип")
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 64
+    response = client.post("/settings", data={"brand_name": "Мой  прокси", "brand_mark": "M P"},
+                           files={"logo": ("logo.bin", png, "application/octet-stream")},
+                           follow_redirects=False)
+    cfg = config.load()
+    check(response.status_code == 303 and cfg["brand_name"] == "Мой прокси" and cfg["brand_mark"] == "MP"
+          and cfg["logo_file"] == "logo.png",
+          "название, буквы и логотип сохранены; тип определён по содержимому, а не по имени")
+    page = client.get("/models").text
+    check("<title>Модели — Мой прокси</title>" in page and "/_brand/logo.png?v=" in page,
+          "название в заголовке вкладки, логотип в шапке")
+    response = client.get("/_brand/logo.png")
+    check(response.status_code == 200 and response.headers["content-type"] == "image/png"
+          and "sandbox" in response.headers.get("content-security-policy", ""),
+          "логотип отдаётся с типом и запретом скриптов")
+    check(client.get("/_brand/config.json").status_code == 404, "/_brand/ отдаёт только логотип")
+    response = client.post("/settings", data={"brand_name": "Другое"},
+                           files={"logo": ("evil.png", b"<html>not an image</html>", "image/png")},
+                           follow_redirects=False)
+    check("error=" in response.headers["location"] and config.load()["brand_name"] == "Другое"
+          and config.load()["logo_file"] == "logo.png",
+          "не картинка → ошибка, прежний логотип на месте, остальные поля сохранены")
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    client.post("/settings", data={}, files={"logo": ("l.svg", svg, "image/svg+xml")})
+    check(config.load()["logo_file"] == "logo.svg" and not (config.BRAND_DIR / "logo.png").exists(),
+          "SVG принят, прежний PNG удалён")
+    client.post("/settings", data={"logo_remove": "1"})
+    check(config.load()["logo_file"] == "" and not list(config.BRAND_DIR.glob("logo.*"))
+          and "brand-mark" in client.get("/models").text,
+          "удаление логотипа возвращает плашку")
+
     print("медиа")
     check(client.get("/_media/../config.json").status_code == 404
           and client.get("/_media/not-a-hash.png").status_code == 404,

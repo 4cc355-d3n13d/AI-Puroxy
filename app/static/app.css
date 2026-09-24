@@ -612,7 +612,7 @@ body.no-scroll { overflow: hidden; }
 .nav::-webkit-scrollbar { display: none; }
 .nav a { flex: none; }
 @media (max-width: 1060px) {
-  .brand-text { display: none; }
+  .topbar .brand-text { display: none; }
   .topbar { gap: 12px; }
 }
 @media (max-width: 720px) {
@@ -632,3 +632,18 @@ body.no-scroll { overflow: hidden; }
 
 /* текст в строке лога обрезается многоточием, а не посреди буквы */
 .log-line > .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+/* ------------------------------------------------------------------ оформление */
+
+.brand-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.brand-logo { width: 26px; height: 26px; object-fit: contain; border-radius: 6px; flex: none; }
+.brand-edit { display: flex; gap: 16px; align-items: flex-end; flex-wrap: wrap; }
+.brand-edit .field-pair { flex: 1 1 320px; }
+.brand-preview {
+  display: flex; align-items: center; gap: 9px; height: 42px; padding: 0 14px;
+  border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); font-weight: 620;
+}
+label.check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
+label.check input { accent-color: var(--accent); }
+.banner-err { background: var(--err-soft); color: var(--err); padding: 9px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; font-size: 13px; }
