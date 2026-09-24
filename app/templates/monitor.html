@@ -24,6 +24,7 @@
   <input type="search" id="f-q" placeholder="Поиск по телу запроса/ответа…">
   <select id="f-model"><option value="">Все модели</option></select>
   <select id="f-endpoint"><option value="">Все эндпоинты</option></select>
+  <select id="f-upstream" hidden title="Источник"><option value="">Все источники</option></select>
   <select id="f-status">
     <option value="">Любой статус</option>
     <option value="ok">Только успешные</option>
@@ -33,7 +34,7 @@
     <option value="">Любые запросы</option>
     <option value="tools">🔧 с инструментами</option>
     <option value="reasoning">💭 с рассуждениями</option>
-    <option value="images">🖼 с изображениями</option>
+    <option value="images" title="картинки в запросе или в ответе">🖼 с картинками</option>
     <option value="stream">⚡ потоковые</option>
   </select>
   <input type="date" id="f-from" title="Дата с">
@@ -46,7 +47,9 @@
   </select>
   <button class="ghost" id="f-reset">Сбросить</button>
   <div class="spacer"></div>
-  <label class="small subtle" style="display:flex;align-items:center;gap:6px">
+  <button type="button" class="pending-new" id="pending-new" hidden
+          title="Открытая запись ушла со страницы — закрыть её и показать свежие"></button>
+  <label class="small subtle live-toggle" title="Новые запросы появляются сами каждые 5 секунд; открытая карточка и прокрутка не сбиваются">
     <input type="checkbox" id="auto-refresh" checked style="min-width:auto"> автообновление
   </label>
 </div>

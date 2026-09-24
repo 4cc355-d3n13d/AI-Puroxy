@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from . import media as media_mod
+
 PREVIEW_LIMIT = 400
 
 
@@ -35,12 +37,34 @@ def parse(raw: Any) -> Any:
         return None
 
 
-def _content_parts(content: Any) -> tuple[str, int, list[dict[str, Any]]]:
-    """Текст, число изображений и прочие блоки из поля content любого формата."""
+def _image_src(block: dict[str, Any]) -> str | None:
+    """Ссылка на картинку из блока content любого формата (для браузера)."""
+    image_url = block.get("image_url")
+    if isinstance(image_url, dict):
+        return media_mod.resolve(image_url.get("url"))
+    if isinstance(image_url, str):
+        return media_mod.resolve(image_url)
+    source = block.get("source")
+    if isinstance(source, dict):
+        if source.get("type") == "base64" and isinstance(source.get("data"), str):
+            data = source["data"]
+            if data.startswith(media_mod.REF_PREFIX):
+                return media_mod.resolve(data)
+            return f"data:{source.get('media_type') or 'image/png'};base64,{data}"
+        return media_mod.resolve(source.get("url"))
+    return None
+
+
+def _content_parts(content: Any) -> tuple[str, list[str], list[dict[str, Any]]]:
+    """Текст, картинки (ссылки для браузера) и прочие блоки из поля content любого формата.
+
+    Картинка, которую не удалось показать (обрезанное тело), всё равно учитывается —
+    пустой строкой, чтобы счётчик в логе не врал.
+    """
     if isinstance(content, str):
-        return content, 0, []
+        return content, [], []
     texts: list[str] = []
-    images = 0
+    images: list[str] = []
     extras: list[dict[str, Any]] = []
     if isinstance(content, list):
         for block in content:
@@ -52,7 +76,7 @@ def _content_parts(content: Any) -> tuple[str, int, list[dict[str, Any]]]:
             if kind in ("text", "input_text", "output_text") and isinstance(block.get("text"), str):
                 texts.append(block["text"])
             elif kind in ("image_url", "image", "input_image"):
-                images += 1
+                images.append(_image_src(block) or "")
             elif kind == "thinking" and isinstance(block.get("thinking"), str):
                 extras.append({"kind": "thinking", "text": block["thinking"]})
             elif kind == "tool_use":
@@ -109,6 +133,12 @@ def _request_summary(payload: Any) -> dict[str, Any]:
         "system": None, "messages": [], "tools_offered": [],
         "params": {}, "images": 0, "reasoning_request": None,
     }
+
+    def message(role: str, text: str, images: list[str], extras: list[dict[str, Any]]) -> dict[str, Any]:
+        result["images"] += len(images)
+        return {"role": role, "text": text, "images": len(images),
+                "media": [src for src in images if src], "extras": extras}
+
     if not isinstance(payload, dict):
         return result
 
@@ -140,24 +170,36 @@ def _request_summary(payload: Any) -> dict[str, Any]:
         result["system"] = text or None
 
     if isinstance(payload.get("prompt"), str):
-        result["messages"].append({"role": "user", "text": payload["prompt"], "images": 0, "extras": []})
+        result["messages"].append(message("user", payload["prompt"], [], []))
 
-    for message in payload.get("messages") or []:
-        if not isinstance(message, dict):
+    # медиа-задачи: {"model", "input": {"prompt", "image_url" | "image_urls" | …}}
+    task_input = payload.get("input")
+    if isinstance(task_input, dict):
+        prompt = task_input.get("prompt")
+        images = [media_mod.resolve(src) or "" for src in media_mod.input_sources(task_input)]
+        if isinstance(prompt, str) or images:
+            result["messages"].append(message("user", prompt if isinstance(prompt, str) else "", images, []))
+        result["params"].update({
+            k: v for k, v in task_input.items()
+            if k != "prompt" and not media_mod.IMAGE_KEY.search(k) and isinstance(v, (str, int, float, bool))
+        })
+
+    for item in payload.get("messages") or []:
+        if not isinstance(item, dict):
             continue
-        role = message.get("role") or "user"
-        text, images, extras = _content_parts(message.get("content"))
-        result["images"] += images
+        role = item.get("role") or "user"
+        text, images, extras = _content_parts(item.get("content"))
         if role == "system" and not result["system"]:
+            result["images"] += len(images)
             result["system"] = text
             continue
-        entry = {"role": role, "text": text, "images": images, "extras": extras}
-        if message.get("tool_calls"):
+        entry = message(role, text, images, extras)
+        if item.get("tool_calls"):
             entry["extras"] = extras + [
-                {"kind": "tool_call", **call} for call in _tool_calls(message["tool_calls"])
+                {"kind": "tool_call", **call} for call in _tool_calls(item["tool_calls"])
             ]
-        if message.get("tool_call_id"):
-            entry["tool_call_id"] = message["tool_call_id"]
+        if item.get("tool_call_id"):
+            entry["tool_call_id"] = item["tool_call_id"]
         result["messages"].append(entry)
 
     return result
@@ -166,10 +208,13 @@ def _request_summary(payload: Any) -> dict[str, Any]:
 def _response_summary(payload: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "text": None, "reasoning": None, "tool_calls": [],
-        "finish_reason": None, "error": None, "media": None,
+        "finish_reason": None, "error": None, "media": None, "images": [],
     }
     if not isinstance(payload, dict):
         return result
+
+    # images/generations и картинки в ответе chat/completions
+    result["images"] = [src for src in map(media_mod.resolve, media_mod.response_images(payload)) if src]
 
     error = payload.get("error")
     if isinstance(error, dict):
@@ -189,7 +234,8 @@ def _response_summary(payload: Any) -> dict[str, Any]:
     if isinstance(choices, list) and choices:
         choice = choices[0] if isinstance(choices[0], dict) else {}
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        text, _, extras = _content_parts(message.get("content"))
+        text, images, extras = _content_parts(message.get("content"))
+        result["images"] += [src for src in images if src]
         result["text"] = text or None
         if isinstance(message.get("reasoning"), str):
             result["reasoning"] = message["reasoning"]
@@ -202,7 +248,8 @@ def _response_summary(payload: Any) -> dict[str, Any]:
 
     # формат /v1/messages
     if payload.get("type") == "message" or isinstance(payload.get("content"), list):
-        text, _, extras = _content_parts(payload.get("content"))
+        text, images, extras = _content_parts(payload.get("content"))
+        result["images"] += [src for src in images if src]
         result["text"] = text or None
         result["finish_reason"] = payload.get("stop_reason")
         for extra in extras:
@@ -217,12 +264,8 @@ def _response_summary(payload: Any) -> dict[str, Any]:
     # медиа-задачи: показываем состояние и результат
     data = payload.get("data")
     if isinstance(data, dict) and (data.get("taskId") or data.get("state")):
-        media = {"task_id": data.get("taskId"), "state": data.get("state"), "urls": []}
-        results = parse(data.get("resultJson")) if data.get("resultJson") else None
-        if isinstance(results, dict):
-            urls = results.get("resultUrls")
-            if isinstance(urls, list):
-                media["urls"] = [u for u in urls if isinstance(u, str)]
+        media = {"task_id": data.get("taskId"), "state": data.get("state"),
+                 "urls": media_mod.result_urls(payload)}
         if data.get("failMsg"):
             result["error"] = str(data["failMsg"])
         result["media"] = media
@@ -284,6 +327,7 @@ def compact(request_body: Any, response_body: Any) -> dict[str, Any]:
         "tools_offered": len(request["tools_offered"]) or None,
         "tools_called": ",".join(called) or None,
         "images": request["images"] or None,
+        "media_out": len(response["images"]) + len((response["media"] or {}).get("urls") or []) or None,
         "finish_reason": response["finish_reason"],
         "reasoning_tokens": summary["tokens"].get("reasoning_tokens"),
         "cached_tokens": summary["tokens"].get("cached_tokens") or summary["tokens"].get("cache_read_input_tokens"),

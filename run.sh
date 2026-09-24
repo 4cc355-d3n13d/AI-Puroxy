@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Запуск прокси: ./run.sh [порт]
+# Запуск прокси: ./run.sh [порт] [аргументы uvicorn…]
 #
-# По умолчанию слушает только localhost. Чтобы открыть доступ из локальной сети:
-#   AI_PROXY_HOST=0.0.0.0 ./run.sh
+# Адрес и порт по умолчанию — из настроек (/settings, data/config.json); изначально
+# это 127.0.0.1:8787. Разово переопределить: ./run.sh 9000, AI_PROXY_HOST=0.0.0.0 ./run.sh
 set -euo pipefail
 
 cd "$(dirname "$0")"
-PORT="${1:-8787}" # Set Proxy Port Number
-HOST="${AI_PROXY_HOST:-127.0.0.1}" # Proxy Host to listen on
 RED='\033[0;31m' # Red Color
 NC='\033[0m' # No Color
+
+if [ ! -d .venv ]; then
+  ./install.sh
+fi
+
+PORT="${1:-${AI_PROXY_PORT:-$(./.venv/bin/python -m app.config get port 2>/dev/null || echo 8787)}}"
+HOST="${AI_PROXY_HOST:-$(./.venv/bin/python -m app.config get host 2>/dev/null || echo 127.0.0.1)}"
 
 # Прокси держит базу DuckDB эксклюзивно: второй экземпляр её не откроет.
 # Чаще всего порт уже занят сервисом, который сам стартовал после перезагрузки.
@@ -20,19 +25,6 @@ if [ -n "$BUSY_PID" ]; then
   echo "    Остановить: ./service.sh stop     (если нужен ручной запуск)"
   echo "    Или возьмите свободный порт: ./run.sh 8788"
   exit 1
-fi
-
-if [ ! -d .venv ]; then
-  ./reset.sh
-  # echo "→ удаляю виртуальное окружение…"
-  # rm -rf ./.venv
-  # echo "→ пересоздаю виртуальное окружение…"
-  # python3 -m venv .venv
-  # echo "→ устанавливаю зависимости окружения (1/2)…"
-  # ./.venv/bin/pip install --quiet --upgrade pip
-  # echo "→ устанавливаю зависимости приложения (2/2)…"
-  # ./.venv/bin/pip install --quiet -r requirements.txt
-  # echo "→ установка зависимостей завершена ✅"
 fi
 
 echo "→ интерфейс: http://localhost:${PORT}/monitor"
@@ -49,6 +41,8 @@ if [ "$HOST" != "127.0.0.1" ] && [ "$HOST" != "localhost" ]; then
   printf "${NC}"
 fi
 
+# фактический адрес нужен странице настроек, чтобы подсказать про перезапуск
+export AI_PROXY_LISTEN="${HOST}:${PORT}"
 exec ./.venv/bin/python -m uvicorn app.main:app --host "${HOST}" --port "${PORT}" "${@:2}"
 
 printf "\n🙋 ${RED}Всего наилучего, до скорых встреч${NC}!!\n\n"

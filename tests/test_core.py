@@ -1,6 +1,8 @@
 """Проверка ключевой логики без обращения к внешнему API: python3 tests/test_core.py"""
 from __future__ import annotations
 
+import base64
+import json
 import os
 import sys
 import tempfile
@@ -10,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ["AI_PROXY_DATA_DIR"] = tempfile.mkdtemp(prefix="ai-proxy-test-")
 
-from app import config, db, docsrc, inspect, proxy, usage  # noqa: E402
+from app import config, db, docsrc, inspect, media, proxy, stats, usage  # noqa: E402
 
 checks = 0
 
@@ -196,6 +198,160 @@ saved = config.save({"api_key": "sk-abcdef123456789", "retention_days": "7", "ba
 check(saved["retention_days"] == 7 and saved["balance_threshold"] == 100.5, "строки приводятся к числам")
 check(saved["base_url"] == "https://example.com/api", "завершающий слэш убирается")
 check(config.masked_key("sk-abcdef123456789") == "sk-abcd…6789", "ключ маскируется")
+
+print("config — источники")
+config._cache = None
+config.CONFIG_PATH.write_text('{"api_key": "sk-old", "base_url": "https://old.example/api/", "retention_days": 2}', "utf-8")
+cfg = config.load()
+check(len(cfg["sources"]) == 1 and cfg["sources"][0]["base_url"] == "https://old.example/api"
+      and cfg["api_key"] == "sk-old" and cfg["source"] == "old-example",
+      "ключ и URL из прежней конфигурации стали первым источником")
+cfg = config.save({"sources": [
+    {"id": "old-example", "name": "Старый", "base_url": "https://old.example/api", "api_key": "sk-old"},
+    {"name": "Новый", "base_url": "https://new.example/api", "api_key": "sk-new", "active": True},
+    {"name": "Новый", "base_url": "https://new.example/v2", "api_key": ""},
+    {"name": "без адреса", "base_url": ""},
+]})
+check([s["id"] for s in cfg["sources"]] == ["old-example", "new-example", "new-example-2"],
+      "id: существующий сохраняется, новый — по хосту, совпадения с суффиксом, пустой URL отброшен")
+check(cfg["active_source"] == "new-example" and cfg["api_key"] == "sk-new" and cfg["base_url"] == "https://new.example/api",
+      "api_key/base_url берутся из активного источника")
+stored = json.loads(config.CONFIG_PATH.read_text("utf-8"))
+check("api_key" not in stored and "base_url" not in stored, "производные поля в файл не пишутся")
+cfg = config.save({"active_source": "нет-такого"})
+check(cfg["active_source"] == "old-example", "несуществующий активный источник → первый")
+cfg = config.save({"api_key": "sk-changed"})
+check(cfg["sources"][0]["api_key"] == "sk-changed" and cfg["sources"][1]["api_key"] == "sk-new",
+      "api_key без списка меняет только активный источник")
+cfg = config.save({"port": "70000", "host": "", "cost_mode": "как-нибудь"})
+check(cfg["port"] == 8787 and cfg["host"] == "127.0.0.1" and cfg["cost_mode"] == "auto",
+      "неверные порт, адрес и режим стоимости → значения по умолчанию")
+check(config.save({"port": "9000"})["port"] == 9000, "порт сохраняется числом")
+
+print("usage.fill_cost — режимы расчёта")
+db.upsert_model_pricing([{"id": "m/priced", "cost_context": 1, "cost_completion": 2}], "src-a")
+base = {"model": "m/priced", "upstream": "src-a", "prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+entry = {**base, "cost": 5.0}
+usage.fill_cost(entry, "auto")
+check(entry["cost"] == 5.0 and entry["cost_source"] == "api" and entry["cost_estimated"] == 3.0,
+      "auto: цена API, оценка по прайсу сохранена рядом")
+entry = {**base, "cost": 5.0}
+usage.fill_cost(entry, "pricelist")
+check(entry["cost"] == 3.0 and entry["cost_source"] == "estimated" and entry["cost_api"] == 5.0,
+      "pricelist: оценка по прайсу, цена API сохранена рядом")
+entry = {**base, "cost": None}
+usage.fill_cost(entry, "api")
+check(entry["cost"] is None and entry["cost_source"] is None and entry["cost_estimated"] == 3.0,
+      "api: без цены в ответе стоимости нет")
+entry = {**base, "upstream": "src-b", "cost": None}
+usage.fill_cost(entry, "auto")
+check(entry["cost"] is None, "прайс другого источника не применяется")
+
+print("db.recompute_costs — смена режима пересчитывает историю")
+rid = db.log_request({**base, "method": "POST", "path": "/v1/chat/completions", "status_code": 200,
+                      "cost": 5.0, "cost_source": "api", "cost_api": 5.0, "cost_estimated": 3.0})
+cost_of = lambda: db.query("SELECT cost, cost_source FROM requests WHERE id = ?", [rid])[0]
+db.recompute_costs("pricelist")
+check(cost_of() == {"cost": 3.0, "cost_source": "estimated"}, "pricelist → оценка")
+db.recompute_costs("api")
+check(cost_of() == {"cost": 5.0, "cost_source": "api"}, "api → цена из ответа")
+
+print("db.migrate — записи прежних версий")
+db.execute("INSERT INTO requests (ts, day, model, prompt_tokens, completion_tokens, cost, cost_source) "
+           "VALUES (now(), current_date, 'm/priced', 1000000, 0, 7.0, 'api')")
+db.execute("INSERT INTO balance_snapshots (ts, day, amount, source) VALUES (now(), current_date, 10, 'poll')")
+db.execute("INSERT INTO model_pricing VALUES ('m/legacy', 4, 4, 'RUB', now())")
+db.migrate("src-a")
+legacy = db.query("SELECT upstream, cost_api, cost_estimated FROM requests WHERE cost = 7.0")[0]
+check(legacy == {"upstream": "src-a", "cost_api": 7.0, "cost_estimated": 1.0},
+      "источник проставлен, цена API перенесена, оценка по прайсу досчитана")
+check(db.latest_balance("src-a")["amount"] == 10.0 and db.latest_balance("другой") is None,
+      "снимки баланса привязаны к источнику")
+check(db.model_pricing("m/legacy", "src-a") is not None, "прайс из старой таблицы перенесён в источник")
+
+print("media — картинки из тел")
+png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4).decode()
+chat = {"model": "v/vision", "messages": [{"role": "user", "content": [
+    {"type": "text", "text": "Что на картинке?"},
+    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}"}},
+    {"type": "image_url", "image_url": {"url": "https://cdn.example/cat.jpg"}},
+]}]}
+rewritten, found = media.extract_request(chat)
+ref = rewritten["messages"][0]["content"][1]["image_url"]["url"]
+check(ref.startswith("media://") and ref.endswith(".png") and (config.MEDIA_DIR / ref[8:]).is_file(),
+      "data:-картинка сохранена файлом, в теле — ссылка media://")
+check(chat["messages"][0]["content"][1]["image_url"]["url"].startswith("data:"),
+      "исходный запрос (уходит в апстрим) не изменён")
+check([i["url"] or i["file"] for i in found.items] == [ref[8:], "https://cdn.example/cat.jpg"],
+      "учтены и файл, и внешняя ссылка")
+_, again = media.extract_request(chat)
+check(again.items[0]["file"] == found.items[0]["file"], "одинаковая картинка → тот же файл (имя — хэш)")
+
+anthropic_req = {"messages": [{"role": "user", "content": [
+    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": png}}]}]}
+rewritten, found = media.extract_request(anthropic_req)
+check(rewritten["messages"][0]["content"][0]["source"]["data"].endswith(".jpg") and found.items[0]["mime"] == "image/jpeg",
+      "/v1/messages: source.data сохранён с типом из media_type")
+
+task = {"model": "q/edit", "input": {"prompt": "улучши", "image_url": "https://i.example/a.png",
+                                     "reference_image_urls": ["https://i.example/b.png"], "aspect_ratio": "1:1"}}
+_, found = media.extract_request(task)
+check([i["url"] for i in found.items] == ["https://i.example/a.png", "https://i.example/b.png"] and found.prompt == "улучши",
+      "медиа-задача: входные картинки по ключам *image*, промпт для подписи")
+
+status = {"data": {"state": "success", "prompt": "кот",
+                   "inputParams": {"image_url": "https://i.example/input.png"},
+                   "resultJson": '{"resultUrls":["https://r.example/out.webp","https://r.example/out.mp4"]}'}}
+_, found = media.extract_response(status)
+check([(i["url"], i["kind"]) for i in found.items] == [("https://r.example/out.webp", "image"), ("https://r.example/out.mp4", "video")],
+      "статус задачи: результаты из resultUrls, входные параметры результатом не считаются")
+generated = {"created": 1, "data": [{"b64_json": png}]}
+rewritten, found = media.extract_response(generated)
+check(rewritten["data"][0]["b64_json"].startswith("media://") and found.items[0]["direction"] == "output",
+      "images/generations: b64_json сохранён файлом")
+check(media.extract_response({"object": "list", "data": [{"id": "x", "url": "https://docs.example"}]})[1].items == [],
+      "каталоги с data-списком картинками не считаются")
+check(media.rewrite_body('{"a": 1}', {"a": 1}, {"a": 1}, media.Collector("input")) == '{"a": 1}',
+      "без встроенных данных тело в логе остаётся исходным текстом")
+
+print("inspect — картинки в карточке")
+body = json.dumps(media.extract_request(chat)[0])
+detail = inspect.summarize(body, json.dumps(status))
+message = detail["request"]["messages"][0]
+check(message["images"] == 2 and message["media"][0].startswith("/_media/") and message["media"][1] == "https://cdn.example/cat.jpg",
+      "картинки сообщения — ссылки для браузера")
+check(detail["response"]["media"]["urls"][0] == "https://r.example/out.webp", "результаты задачи в карточке")
+check(inspect.compact(body, json.dumps(status))["media_out"] == 2, "в строке лога посчитаны медиа в ответе")
+task_detail = inspect.summarize(task, {})
+check(task_detail["request"]["messages"][0]["media"] == ["https://i.example/a.png", "https://i.example/b.png"]
+      and task_detail["request"]["params"] == {"aspect_ratio": "1:1"},
+      "карточка медиа-задачи: промпт, входные картинки, параметры")
+check(inspect.summarize({}, generated)["response"]["images"] == [], "b64 без сохранения в карточку не тащим")
+check(inspect.summarize({}, media.extract_response(generated)[0])["response"]["images"][0].startswith("/_media/"),
+      "сгенерированная картинка в карточке — ссылка на файл")
+
+print("db — галерея и ретеншен файлов")
+_, inputs = media.extract_request(chat)
+old_ts = datetime.now() - timedelta(days=30)
+first = db.log_request({"ts": old_ts, "method": "POST", "path": "/v1/chat/completions", "model": "v/vision",
+                        "upstream": "src-a", "request_body": json.dumps(chat), "media": inputs.items})
+second = db.log_request({"ts": old_ts + timedelta(days=1), "method": "POST", "model": "v/vision",
+                         "upstream": "src-a", "media": inputs.items})
+row = db.query("SELECT request_id, last_request_id, uses, prompt FROM media WHERE key = ?", [inputs.items[0]["key"]])[0]
+check(row["request_id"] == first and row["last_request_id"] == second and row["uses"] == 2
+      and row["prompt"] == "Что на картинке?", "повтор картинки не дублирует её, а обновляет последнее упоминание")
+page = stats.media_page({"direction": "input"})
+check(page["total"] == 2 and page["items"][0]["src"].startswith(("/_media/", "https://")), "страница галереи")
+saved = config.MEDIA_DIR / inputs.items[0]["file"]
+db.apply_retention(7)
+check(not saved.exists() and not db.query("SELECT 1 FROM media"), "ретеншен удаляет старые медиа и их файлы")
+
+print("db.backfill_media — картинки из старых записей")
+db.execute("INSERT INTO requests (ts, day, model, request_body, media_scanned) VALUES (now(), current_date, 'v/old', ?, FALSE)",
+           [json.dumps(chat)])
+check(db.backfill_media() >= 1 and db.query("SELECT count(*) AS n FROM media WHERE model = 'v/old'")[0]["n"] == 2,
+      "в старых записях найдены и сохранены картинки")
+check(db.backfill_media() == 0, "повторный проход ничего не делает")
 
 db.close()
 print(f"\nВсе проверки пройдены: {checks}")

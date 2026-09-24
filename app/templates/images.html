@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Галерея — AI Monitoring Proxy{% endblock %}
+
+{% block content %}
+<div class="filters">
+  <div class="segmented" id="g-direction" role="tablist">
+    <button type="button" data-value="" class="is-active">Все</button>
+    <button type="button" data-value="output">Результаты</button>
+    <button type="button" data-value="input">Входящие</button>
+  </div>
+  <select id="g-kind" title="Тип">
+    <option value="">Все типы</option>
+    <option value="image">Только картинки</option>
+    <option value="video">Только видео</option>
+    <option value="audio">Только аудио</option>
+  </select>
+  <select id="g-model"><option value="">Все модели</option></select>
+  <input type="search" id="g-q" placeholder="Поиск по промпту…">
+  <div class="spacer"></div>
+  <span class="small subtle" id="g-summary"></span>
+</div>
+
+<div class="gallery" id="gallery"><div class="empty">Загрузка…</div></div>
+
+<div class="pager" id="g-pager">
+  <button id="g-prev" class="ghost">← Назад</button>
+  <span class="small subtle" id="g-page"></span>
+  <button id="g-next" class="ghost">Вперёд →</button>
+</div>
+{% endblock %}
+
+{% block scripts %}<script src="/static/images.js?v={{ v }}"></script>{% endblock %}

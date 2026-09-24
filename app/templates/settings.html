@@ -5,30 +5,137 @@
 <h1>Настройки прокси</h1>
 {% if saved %}<div class="banner-ok">Настройки сохранены.</div>{% endif %}
 
-<div class="settings-grid">
-  <section class="card">
-    <div class="card-body">
-      <form method="post" action="/settings" class="form-rows">
-        <label class="field">
-          API-ключ ИИ-API
-          <input type="password" name="api_key" autocomplete="off" spellcheck="false"
-                 placeholder="{{ masked_key or 'sk-…' }}">
-          <span class="hint">
-            {% if cfg.api_key %}Сейчас сохранён ключ <code>{{ masked_key }}</code>. Оставьте поле пустым, чтобы не менять его.
-            {% else %}Ключ подставляется в заголовок <code>Authorization: Bearer …</code> ко всем проксируемым запросам.{% endif %}
-          </span>
-        </label>
+{% if restart_needed %}
+<div class="banner-restart" id="restart-banner">
+  <div>
+    <b>Адрес или порт изменены — нужен перезапуск.</b>
+    Сейчас прокси слушает <code>{{ listen_host or '…' }}:{{ listen_port }}</code>,
+    после перезапуска будет <code>{{ cfg.host }}:{{ cfg.port }}</code>.
+    {% if not can_restart %}
+      <br>Прокси запущен не сервисом: остановите его и запустите снова (<code>./run.sh</code>)
+      или установите сервис — <code>./service.sh install</code>.
+    {% endif %}
+  </div>
+  {% if can_restart %}
+  <button type="button" class="primary" id="restart-btn"
+          data-host="{{ cfg.host }}" data-port="{{ cfg.port }}">Перезапустить сейчас</button>
+  {% endif %}
+</div>
+{% endif %}
 
-        <label class="field">
-          Base URL ИИ-API
-          <input type="text" name="base_url" value="{{ cfg.base_url }}" spellcheck="false" placeholder="https://api.example.com/api">
-          <span class="hint">Без завершающего слэша. Пути документации добавляются как <code>/v1/…</code>.</span>
-        </label>
+<form method="post" action="/settings" class="settings-grid" id="settings-form">
+  <div class="settings-main">
+    <section class="card">
+      <div class="card-head">
+        <span class="card-title">Источники ИИ-API</span>
+        <span class="subtle small">запросы идут в отмеченный</span>
+      </div>
+      <div class="card-body">
+        <div class="sources" id="sources">
+          <div class="source-head small subtle">
+            <span></span><span>Название</span><span>Base URL</span><span>API-ключ</span><span></span>
+          </div>
+          {% for source in source_rows %}
+          <div class="source-row">
+            <input type="hidden" name="src_id" value="{{ source.id }}">
+            <label class="source-active" title="Активный источник">
+              <input type="radio" name="active_source" value="{{ loop.index0 }}"
+                     {% if source.id == cfg.active_source %}checked{% endif %}>
+            </label>
+            <input type="text" name="src_name" value="{{ source.name }}" placeholder="название" spellcheck="false">
+            <input type="text" name="src_url" value="{{ source.base_url }}" placeholder="https://api.example.com/api" spellcheck="false">
+            <input type="password" name="src_key" autocomplete="off" spellcheck="false"
+                   placeholder="{{ source.masked_key or 'sk-…' }}"
+                   title="{% if source.api_key %}Сохранён {{ source.masked_key }}. Пусто — не менять.{% else %}Ключ не задан{% endif %}">
+            <label class="source-del" title="Удалить источник">
+              <input type="checkbox" name="src_delete" value="{{ loop.index0 }}"><span>✕</span>
+            </label>
+          </div>
+          {% endfor %}
+        </div>
+        <template id="source-template">
+          <div class="source-row is-new">
+            <input type="hidden" name="src_id" value="">
+            <label class="source-active" title="Активный источник">
+              <input type="radio" name="active_source" value="">
+            </label>
+            <input type="text" name="src_name" placeholder="название" spellcheck="false">
+            <input type="text" name="src_url" placeholder="https://api.example.com/api" spellcheck="false">
+            <input type="password" name="src_key" autocomplete="off" spellcheck="false" placeholder="sk-…">
+            <label class="source-del" title="Удалить источник">
+              <input type="checkbox" name="src_delete" value=""><span>✕</span>
+            </label>
+          </div>
+        </template>
+        <div class="form-actions">
+          <button type="button" class="ghost" id="add-source">+ Добавить источник</button>
+        </div>
+        <p class="hint-block">
+          Ключ подставляется в <code>Authorization: Bearer …</code> ко всем проксируемым запросам.
+          У сохранённого источника пустое поле ключа означает «не менять». Base URL — без
+          завершающего слэша, пути добавляются как <code>/v1/…</code>. Баланс, прайс и календарь
+          трат ведутся по каждому источнику отдельно.
+        </p>
+      </div>
+    </section>
 
+    <section class="card">
+      <div class="card-head"><span class="card-title">Расчёт стоимости</span></div>
+      <div class="card-body">
+        <div class="choice-list">
+          {% for mode, label in cost_modes.items() %}
+          <label class="choice">
+            <input type="radio" name="cost_mode" value="{{ mode }}" {% if cfg.cost_mode == mode %}checked{% endif %}>
+            <span>
+              <b>{{ label[:1]|upper }}{{ label[1:] }}</b>
+              <span class="hint">
+                {% if mode == 'auto' %}Цена из <code>usage</code> ответа; если API её не вернул (например, <code>/v1/messages</code>) — оценка по прайсу модели.
+                {% elif mode == 'api' %}Только то, что вернул API. Запросы без цены в ответе останутся без стоимости.
+                {% else %}Всегда оценка по прайсу <code>/v1/models</code> (цена за 1M токенов); если прайса нет — цена из ответа API.{% endif %}
+              </span>
+            </span>
+          </label>
+          {% endfor %}
+        </div>
+        <p class="hint-block">Смена режима сразу пересчитывает всю историю: обе суммы хранятся у каждого запроса.
+          Оценки в логе помечены звёздочкой.</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span class="card-title">Сервер</span></div>
+      <div class="card-body form-rows">
+        <div class="field-pair">
+          <label class="field">
+            Адрес прослушивания
+            <select name="host">
+              <option value="127.0.0.1" {% if cfg.host == '127.0.0.1' %}selected{% endif %}>127.0.0.1 — только этот компьютер</option>
+              <option value="0.0.0.0" {% if cfg.host == '0.0.0.0' %}selected{% endif %}>0.0.0.0 — вся локальная сеть</option>
+              {% if cfg.host not in ('127.0.0.1', '0.0.0.0') %}
+              <option value="{{ cfg.host }}" selected>{{ cfg.host }}</option>
+              {% endif %}
+            </select>
+          </label>
+          <label class="field">
+            Порт
+            <input type="number" name="port" min="1" max="65535" step="1" value="{{ cfg.port }}">
+          </label>
+        </div>
+        <span class="hint">
+          Применяется при перезапуске.
+          {% if listen_port %}Сейчас слушает <code>{{ listen_host or '…' }}:{{ listen_port }}</code>.{% endif %}
+          Интерфейс работает без аутентификации: открыв доступ из сети, вы открываете и API-ключ.
+        </span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><span class="card-title">Прочее</span></div>
+      <div class="card-body form-rows">
         <label class="field">
           Количество хранимых дней
           <input type="number" name="retention_days" min="0" step="1" value="{{ cfg.retention_days }}">
-          <span class="hint">Записи старше указанного числа дней удаляются. <b>0</b> — хранить всё.</span>
+          <span class="hint">Записи старше указанного числа дней удаляются вместе с картинками. <b>0</b> — хранить всё.</span>
         </label>
 
         <label class="field">
@@ -51,20 +158,21 @@
           <input type="number" name="balance_poll_seconds" min="30" step="10" value="{{ cfg.balance_poll_seconds }}">
           <span class="hint">Как часто прокси сам запрашивает <code>/v1/balance</code> для графика и предупреждений.</span>
         </label>
+      </div>
+    </section>
 
-        <div class="form-actions">
-          <button type="submit" class="primary">Сохранить</button>
-          <a class="btn" href="/monitor">К логу</a>
-        </div>
-      </form>
+    <div class="form-actions sticky-actions">
+      <button type="submit" class="primary">Сохранить</button>
+      <a class="btn" href="/monitor">К логу</a>
     </div>
-  </section>
+  </div>
 
   <aside class="card">
     <div class="card-head"><span class="card-title">Состояние</span></div>
     <div class="card-body">
       <div class="kv"><span>Статус</span>
         <b>{% if configured %}<span class="tag ok">настроен</span>{% else %}<span class="tag err">не настроен</span>{% endif %}</b></div>
+      <div class="kv"><span>Источник</span><b>{{ active_source_name or '—' }}</b></div>
       <div class="kv"><span>Запросов в базе</span><b class="num">{{ overview.requests }}</b></div>
       <div class="kv"><span>Моделей</span><b class="num">{{ overview.models }}</b></div>
       <div class="kv"><span>Файл базы</span><b class="mono small">{{ db_path }}</b></div>
@@ -75,16 +183,11 @@
     <div class="card-head" style="border-top:1px solid var(--border)"><span class="card-title">Как подключиться</span></div>
     <div class="card-body small">
       <p class="subtle" style="margin-top:0">Замените базовый URL в своём клиенте — ключ подставит прокси:</p>
-      <pre class="mono" style="background:var(--surface-2);padding:10px;border-radius:6px;overflow:auto">curl http://localhost:8787/v1/models</pre>
+      <pre class="mono" style="background:var(--surface-2);padding:10px;border-radius:6px;overflow:auto">curl http://localhost:{{ listen_port or cfg.port }}/v1/models</pre>
       <p class="subtle">Совместимы оба префикса: <code>/v1/…</code> и <code>/api/v1/…</code>.</p>
     </div>
   </aside>
-</div>
+</form>
 {% endblock %}
 
-{% block scripts %}
-<script>
-  const sizeNode = document.getElementById('db-size');
-  sizeNode.textContent = fmtBytes(Number(sizeNode.dataset.bytes));
-</script>
-{% endblock %}
+{% block scripts %}<script src="/static/settings.js?v={{ v }}"></script>{% endblock %}

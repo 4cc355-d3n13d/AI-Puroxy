@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Запуск прокси: ./run-all.sh [порт]
-PORT="${1:-8787}"
-AI_PROXY_HOST=0.0.0.0 ./run.sh $PORT
+AI_PROXY_HOST=0.0.0.0 ./run.sh "$@"
 echo 0.0.0.0
 
 

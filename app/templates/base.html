@@ -4,6 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}AI Monitoring Proxy{% endblock %}</title>
+  <script>
+    /* тема до загрузки CSS — иначе тёмная страница мелькает светлой при каждом переходе */
+    try {
+      const theme = localStorage.getItem('theme');
+      if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+    } catch (error) { /* хранилище недоступно — остаётся системная тема */ }
+  </script>
   <link rel="stylesheet" href="/static/app.css?v={{ v }}">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
 </head>
@@ -17,12 +24,14 @@
     <a href="/monitor" class="{{ 'is-active' if active == 'monitor' }}">Лог</a>
     <a href="/balance" class="{{ 'is-active' if active == 'balance' }}">Баланс</a>
     <a href="/models" class="{{ 'is-active' if active == 'models' }}">Модели</a>
+    <a href="/images" class="{{ 'is-active' if active == 'images' }}">Галерея</a>
     <a href="/docs" class="{{ 'is-active' if active == 'docs' }}">Документация</a>
     <a href="/settings" class="{{ 'is-active' if active == 'settings' }}">Настройки</a>
   </nav>
   <div class="topbar-right">
-    <a href="/balance" class="balance-chip" id="balance-chip" title="Текущий баланс ИИ-API">
-      <span class="balance-chip-label">баланс</span>
+    <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Тема оформления"></button>
+    <a href="/balance" class="balance-chip" id="balance-chip" title="Текущий баланс ИИ-API{% if active_source_name %} · {{ active_source_name }}{% endif %}">
+      <span class="balance-chip-label">{% if sources|length > 1 %}{{ active_source_name }}{% else %}баланс{% endif %}</span>
       <span class="balance-chip-value" id="balance-chip-value">—</span>
     </a>
   </div>
@@ -38,6 +47,7 @@
   {% block content %}{% endblock %}
 </main>
 
+<script>window.SOURCE_NAMES = {{ source_names|tojson }};</script>
 <script src="/static/common.js?v={{ v }}"></script>
 {% block scripts %}{% endblock %}
 </body>

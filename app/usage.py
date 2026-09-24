@@ -93,11 +93,16 @@ def extract_usage(payload: Any) -> dict[str, Any]:
     return result
 
 
-def estimate_cost(model: str | None, prompt_tokens: int | None, completion_tokens: int | None) -> float | None:
-    """Оценка стоимости по кэшу цен (цены указаны за 1M токенов)."""
+def estimate_cost(
+    model: str | None,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    upstream: str = "",
+) -> float | None:
+    """Оценка стоимости по кэшу цен источника (цены указаны за 1M токенов)."""
     if not model or (not prompt_tokens and not completion_tokens):
         return None
-    pricing = db.model_pricing(model)
+    pricing = db.model_pricing(model, upstream)
     if not pricing:
         return None
     context_price = pricing.get("cost_context")
@@ -112,15 +117,30 @@ def estimate_cost(model: str | None, prompt_tokens: int | None, completion_token
     return total
 
 
-def fill_cost(entry: dict[str, Any]) -> None:
-    """Проставить cost/cost_source в записи лога, оценив цену, если API её не отдал."""
-    if entry.get("cost") is not None:
-        entry.setdefault("cost_source", "api")
-        return
-    estimated = estimate_cost(entry.get("model"), entry.get("prompt_tokens"), entry.get("completion_tokens"))
-    if estimated is not None:
-        entry["cost"] = estimated
-        entry["cost_source"] = "estimated"
+def fill_cost(entry: dict[str, Any], mode: str = "auto") -> None:
+    """Проставить cost/cost_source в записи лога по режиму config.cost_mode.
+
+    Обе суммы — из ответа API (`cost_api`) и по прайсу (`cost_estimated`) — сохраняются,
+    чтобы при смене режима историю можно было пересчитать без разбора тел.
+    """
+    api_cost = entry.get("cost_api")
+    if api_cost is None:
+        api_cost = entry.get("cost")
+    estimated = estimate_cost(
+        entry.get("model"), entry.get("prompt_tokens"), entry.get("completion_tokens"),
+        entry.get("upstream") or "",
+    )
+    entry["cost_api"] = api_cost
+    entry["cost_estimated"] = estimated
+    if mode == "api":
+        order = (("api", api_cost),)
+    elif mode == "pricelist":
+        order = (("estimated", estimated), ("api", api_cost))
+    else:
+        order = (("api", api_cost), ("estimated", estimated))
+    entry["cost"], entry["cost_source"] = next(
+        ((value, source) for source, value in order if value is not None), (None, None)
+    )
 
 
 def parse_balance(payload: Any) -> float | None:

@@ -215,3 +215,156 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshBalanceChip();
   setInterval(refreshBalanceChip, 60000);
 });
+
+/* --------------------------------------------------------- медиа: миниатюры и просмотр */
+
+const mediaKind = (src, kind) => {
+  if (kind) return kind;
+  const path = String(src || '').split('?')[0].toLowerCase();
+  if (/\.(mp4|webm|mov|m4v)$/.test(path) || path.startsWith('data:video/')) return 'video';
+  if (/\.(mp3|wav|ogg|m4a|aac|flac|opus)$/.test(path) || path.startsWith('data:audio/')) return 'audio';
+  return 'image';
+};
+
+/**
+ * Миниатюра картинки/видео; клик открывает просмотр. Миниатюры с одинаковым
+ * `group` листаются в просмотре стрелками. `request` — id запроса для ссылки на него.
+ */
+function mediaThumb(src, options = {}) {
+  const kind = mediaKind(src, options.kind);
+  if (kind === 'audio') return `<audio class="thumb-audio" controls preload="none" src="${esc(src)}"></audio>`;
+  const attrs = `data-src="${esc(src)}" data-kind="${kind}" data-group="${esc(options.group || '')}"
+    data-caption="${esc(options.caption || '')}" data-request="${esc(options.request || '')}"
+    title="${esc(options.caption || 'открыть')}"`;
+  const inner = kind === 'video'
+    ? `<video src="${esc(src)}#t=0.1" preload="metadata" muted playsinline></video><span class="thumb-play">▶</span>`
+    : `<img src="${esc(src)}" loading="lazy" alt="" onerror="this.parentNode.classList.add('is-broken')">`;
+  return `<button type="button" class="thumb ${options.size || ''}" ${attrs}>${inner}</button>`;
+}
+
+const lightbox = { items: [], index: 0, node: null };
+
+function ensureLightbox() {
+  if (lightbox.node) return lightbox.node;
+  const node = document.createElement('div');
+  node.className = 'lightbox';
+  node.hidden = true;
+  node.innerHTML = `
+    <button type="button" class="lb-close" title="Закрыть (Esc)">✕</button>
+    <button type="button" class="lb-nav lb-prev" title="Предыдущее (←)">‹</button>
+    <div class="lb-stage"></div>
+    <button type="button" class="lb-nav lb-next" title="Следующее (→)">›</button>
+    <div class="lb-caption"></div>`;
+  document.body.appendChild(node);
+  node.addEventListener('click', (event) => {
+    if (event.target === node || event.target.classList.contains('lb-stage') || event.target.closest('.lb-close')) closeLightbox();
+    else if (event.target.closest('.lb-prev')) stepLightbox(-1);
+    else if (event.target.closest('.lb-next')) stepLightbox(1);
+  });
+  document.addEventListener('keydown', (event) => {
+    if (node.hidden) return;
+    if (event.key === 'Escape') closeLightbox();
+    if (event.key === 'ArrowLeft') stepLightbox(-1);
+    if (event.key === 'ArrowRight') stepLightbox(1);
+  });
+  lightbox.node = node;
+  return node;
+}
+
+function renderLightbox() {
+  const node = ensureLightbox();
+  const item = lightbox.items[lightbox.index];
+  const stage = node.querySelector('.lb-stage');
+  stage.innerHTML = item.kind === 'video'
+    ? `<video src="${esc(item.src)}" controls autoplay playsinline></video>`
+    : `<img src="${esc(item.src)}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className: 'lb-missing', textContent: 'Файл недоступен — ссылка апстрима могла истечь'}))">`;
+  const many = lightbox.items.length > 1;
+  node.querySelector('.lb-prev').hidden = !many;
+  node.querySelector('.lb-next').hidden = !many;
+  const isFile = item.src.startsWith('/_media/');
+  node.querySelector('.lb-caption').innerHTML = `
+    ${item.caption ? `<div class="lb-text">${esc(item.caption)}</div>` : ''}
+    <div class="lb-links">
+      ${many ? `<span>${lightbox.index + 1} / ${lightbox.items.length}</span>` : ''}
+      ${item.src.startsWith('data:') ? '' : `<a href="${esc(item.src)}" target="_blank" rel="noreferrer">${isFile ? 'Открыть файл' : 'Оригинал ↗'}</a>`}
+      ${item.request ? `<a href="/monitor?request=${encodeURIComponent(item.request)}">Запрос #${esc(item.request)}</a>` : ''}
+    </div>`;
+}
+
+function openLightbox(items, index) {
+  lightbox.items = items;
+  lightbox.index = index;
+  renderLightbox();
+  ensureLightbox().hidden = false;
+  document.body.classList.add('no-scroll');
+}
+
+function closeLightbox() {
+  const node = ensureLightbox();
+  node.hidden = true;
+  node.querySelector('.lb-stage').innerHTML = ''; // останавливает видео
+  document.body.classList.remove('no-scroll');
+}
+
+function stepLightbox(delta) {
+  if (lightbox.items.length < 2) return;
+  lightbox.index = (lightbox.index + delta + lightbox.items.length) % lightbox.items.length;
+  renderLightbox();
+}
+
+document.addEventListener('click', (event) => {
+  const thumb = event.target.closest('.thumb');
+  if (!thumb || thumb.classList.contains('is-broken')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const group = thumb.dataset.group;
+  const nodes = group ? [...document.querySelectorAll(`.thumb[data-group="${CSS.escape(group)}"]`)] : [thumb];
+  const items = nodes.filter((node) => !node.classList.contains('is-broken')).map((node) => ({ ...node.dataset }));
+  openLightbox(items, Math.max(0, items.findIndex((item) => item.src === thumb.dataset.src)));
+}, true);
+
+/* Имя источника по id — для меток в логе. */
+const sourceName = (id) => (window.SOURCE_NAMES && window.SOURCE_NAMES[id]) || id;
+
+/* --------------------------------------------------------- тема: системная → светлая → тёмная */
+
+const THEMES = [
+  { value: 'system', icon: '◐', label: 'как в системе' },
+  { value: 'light', icon: '☀', label: 'светлая' },
+  { value: 'dark', icon: '☾', label: 'тёмная' },
+];
+
+function currentTheme() {
+  const value = document.documentElement.dataset.theme;
+  return value === 'light' || value === 'dark' ? value : 'system';
+}
+
+function renderThemeToggle() {
+  const button = document.getElementById('theme-toggle');
+  if (!button) return;
+  const theme = THEMES.find((item) => item.value === currentTheme());
+  const next = THEMES[(THEMES.indexOf(theme) + 1) % THEMES.length];
+  button.textContent = theme.icon;
+  button.title = `Тема: ${theme.label}. Нажмите — ${next.label}`;
+}
+
+function setTheme(value) {
+  if (value === 'system') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = value;
+  try {
+    if (value === 'system') localStorage.removeItem('theme');
+    else localStorage.setItem('theme', value);
+  } catch (error) { /* выбор не запомнится, но на этой странице применится */ }
+  renderThemeToggle();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  renderThemeToggle();
+  const button = document.getElementById('theme-toggle');
+  if (button) {
+    button.addEventListener('click', () => {
+      const index = THEMES.findIndex((item) => item.value === currentTheme());
+      setTheme(THEMES[(index + 1) % THEMES.length].value);
+    });
+  }
+});

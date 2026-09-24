@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Установка прокси как сервиса, который стартует сам и переживает перезагрузку.
 #
-#   ./service.sh install              — поставить и запустить (только localhost)
-#   ./service.sh install --host 0.0.0.0 --port 9000
+#   ./service.sh install              — поставить и запустить (адрес и порт — из /settings)
+#   ./service.sh install --host 0.0.0.0 --port 9000   — заодно сохранить их в настройки
 #   ./service.sh status               — состояние
 #   ./service.sh start|stop|restart   — управление
 #   ./service.sh logs                 — хвост журнала
@@ -22,8 +22,10 @@ LOG_DIR="$PROJECT_DIR/data/logs"
 LOG_OUT="$LOG_DIR/service.log"
 LOG_ERR="$LOG_DIR/service.err.log"
 
-PORT="${AI_PROXY_PORT:-8787}"
-HOST="${AI_PROXY_HOST:-127.0.0.1}"
+# Адрес и порт живут в data/config.json (их меняют и на /settings); аргументы и
+# AI_PROXY_HOST / AI_PROXY_PORT при install записываются туда же.
+PORT="${AI_PROXY_PORT:-}"
+HOST="${AI_PROXY_HOST:-}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
 
@@ -37,8 +39,8 @@ esac
 
 COMMAND="${1:-}"
 shift || true
-PORT_GIVEN=""
-HOST_GIVEN=""
+PORT_GIVEN="${PORT:+1}"
+HOST_GIVEN="${HOST:+1}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --port) PORT="$2"; PORT_GIVEN=1; shift 2 ;;
@@ -54,19 +56,48 @@ usage() {
   exit 1
 }
 
-# Адрес и порт живут в установленном описании сервиса. Без этого команды
-# status/start/stop/restart молча брали значения по умолчанию и проверяли не тот порт.
-read_installed_config() {
-  local host="" port=""
-  if [ "$PLATFORM" = "linux" ] && [ -f "$UNIT" ]; then
-    host="$(sed -n 's/^ExecStart=.*--host \([^ ]*\).*/\1/p' "$UNIT" | head -1)"
-    port="$(sed -n 's/^ExecStart=.*--port \([^ ]*\).*/\1/p' "$UNIT" | head -1)"
-  elif [ "$PLATFORM" = "macos" ] && [ -f "$PLIST" ]; then
-    host="$(grep -A1 -- '--host' "$PLIST" | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')"
-    port="$(grep -A1 -- '--port' "$PLIST" | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')"
+# Python для чтения настроек: config.py обходится стандартной библиотекой,
+# поэтому годится и системный, если .venv ещё нет.
+config_python() {
+  if [ -x "$PROJECT_DIR/.venv/bin/python" ] && "$PROJECT_DIR/.venv/bin/python" -c "" 2>/dev/null; then
+    echo "$PROJECT_DIR/.venv/bin/python"
+  else
+    echo python3
   fi
-  [ -z "$HOST_GIVEN" ] && [ -n "$host" ] && HOST="$host"
-  [ -z "$PORT_GIVEN" ] && [ -n "$port" ] && PORT="$port"
+}
+
+config_get() { (cd "$PROJECT_DIR" && "$(config_python)" -m app.config get "$1" 2>/dev/null); }
+config_set() { (cd "$PROJECT_DIR" && "$(config_python)" -m app.config set "$@"); }
+
+# Сервисы прежних версий держали адрес и порт в описании (uvicorn --host … --port …):
+# у такого сервиса они и есть фактические, а не те, что в настройках.
+legacy_address() {
+  LEGACY_HOST=""; LEGACY_PORT=""
+  if [ "$PLATFORM" = "linux" ] && [ -f "$UNIT" ] && grep -q -- '--port' "$UNIT"; then
+    LEGACY_HOST="$(sed -n 's/^ExecStart=.*--host \([^ ]*\).*/\1/p' "$UNIT" | head -1)"
+    LEGACY_PORT="$(sed -n 's/^ExecStart=.*--port \([^ ]*\).*/\1/p' "$UNIT" | head -1)"
+  elif [ "$PLATFORM" = "macos" ] && [ -f "$PLIST" ] && grep -q -- '--port' "$PLIST"; then
+    LEGACY_HOST="$(grep -A1 -- '--host' "$PLIST" | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')"
+    LEGACY_PORT="$(grep -A1 -- '--port' "$PLIST" | tail -1 | sed 's/.*<string>\(.*\)<\/string>.*/\1/')"
+  fi
+  return 0
+}
+
+# Адрес и порт для команды: заданные явно, иначе у сервиса старого формата — из его
+# описания, иначе из настроек. При install старый адрес переносится в настройки
+# (один раз, пока порта там нет) — дальше описание сервиса его уже не хранит.
+read_address() {
+  legacy_address
+  if [ "$COMMAND" = "install" ] && [ -n "$LEGACY_PORT" ] \
+     && { [ ! -f "$PROJECT_DIR/data/config.json" ] || ! grep -q '"port"' "$PROJECT_DIR/data/config.json"; }; then
+    config_set "host=${LEGACY_HOST:-127.0.0.1}" "port=${LEGACY_PORT}" \
+      && echo "→ адрес ${LEGACY_HOST:-127.0.0.1}:${LEGACY_PORT} из описания сервиса перенесён в настройки"
+    LEGACY_HOST=""; LEGACY_PORT=""
+  fi
+  [ -n "$HOST" ] || HOST="${LEGACY_HOST:-$(config_get host || true)}"
+  [ -n "$PORT" ] || PORT="${LEGACY_PORT:-$(config_get port || true)}"
+  HOST="${HOST:-127.0.0.1}"
+  PORT="${PORT:-8787}"
   return 0
 }
 
@@ -198,12 +229,7 @@ write_plist() {
     <array>
         <string>${PROJECT_DIR}/.venv/bin/python</string>
         <string>-m</string>
-        <string>uvicorn</string>
-        <string>app.main:app</string>
-        <string>--host</string>
-        <string>${HOST}</string>
-        <string>--port</string>
-        <string>${PORT}</string>
+        <string>app</string>
     </array>
     <key>WorkingDirectory</key>
     <string>${PROJECT_DIR}</string>
@@ -223,6 +249,8 @@ write_plist() {
         <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <key>AI_PROXY_SERVICE</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
@@ -239,8 +267,9 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=${PROJECT_DIR}/.venv/bin/python -m uvicorn app.main:app --host ${HOST} --port ${PORT}
+ExecStart=${PROJECT_DIR}/.venv/bin/python -m app
 Environment=PYTHONUNBUFFERED=1
+Environment=AI_PROXY_SERVICE=1
 Restart=always
 RestartSec=10
 
@@ -285,6 +314,13 @@ unload_service() {
 
 cmd_install() {
   ensure_venv
+  # адрес и порт сервис берёт из настроек при каждом старте — сохраняем заданные явно
+  if [ -n "$PORT_GIVEN$HOST_GIVEN" ]; then
+    config_set ${HOST_GIVEN:+"host=$HOST"} ${PORT_GIVEN:+"port=$PORT"}
+  fi
+  HOST="$(config_get host || echo 127.0.0.1)"
+  PORT="$(config_get port || echo 8787)"
+  PORT_GIVEN=""; HOST_GIVEN=""; LEGACY_PORT=""
 
   local holder
   holder="$(port_holder || true)"
@@ -399,7 +435,11 @@ cmd_restart() {
 cmd_status() {
   echo "Проект:    $PROJECT_DIR"
   echo "Платформа: $PLATFORM"
-  echo "Адрес:     ${HOST}:${PORT}$([ -z "$PORT_GIVEN$HOST_GIVEN" ] && is_installed && echo "  (из описания сервиса)")"
+  echo "Адрес:     ${HOST}:${PORT}$([ -z "$PORT_GIVEN$HOST_GIVEN$LEGACY_PORT" ] && echo "  (из настроек, data/config.json)")"
+  if [ -n "$LEGACY_PORT" ]; then
+    echo -e "${YELLOW}Описание сервиса старого формата: адрес в нём зашит, смена порта на /settings не применится.${NC}"
+    echo "           Обновите его: ./service.sh install"
+  fi
   if is_installed; then
     echo -e "Установлен: ${GREEN}да${NC}  ($([ "$PLATFORM" = macos ] && echo "$PLIST" || echo "$UNIT"))"
   else
@@ -446,13 +486,12 @@ cmd_logs() {
 }
 
 case "$COMMAND" in
-  # install задаёт адрес и порт сам; остальным командам их надо взять из установленного описания
-  install)   cmd_install ;;
-  uninstall) read_installed_config; cmd_uninstall ;;
-  start)     read_installed_config; cmd_start ;;
-  stop)      read_installed_config; cmd_stop ;;
-  restart)   read_installed_config; cmd_restart ;;
-  status)    read_installed_config; cmd_status ;;
+  install)   read_address; cmd_install ;;
+  uninstall) read_address; cmd_uninstall ;;
+  start)     read_address; cmd_start ;;
+  stop)      read_address; cmd_stop ;;
+  restart)   read_address; cmd_restart ;;
+  status)    read_address; cmd_status ;;
   logs)      cmd_logs ;;
   *)         usage ;;
 esac

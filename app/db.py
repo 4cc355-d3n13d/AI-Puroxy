@@ -9,7 +9,7 @@ from typing import Any, Iterable
 
 import duckdb
 
-from . import config, inspect
+from . import config, inspect, media
 
 _lock = threading.RLock()
 _conn: duckdb.DuckDBPyConnection | None = None
@@ -66,6 +66,50 @@ CREATE TABLE IF NOT EXISTS model_pricing (
     cost_completion DOUBLE,
     currency        VARCHAR,
     updated_at      TIMESTAMP
+);
+
+-- источник (апстрим), через который прошёл запрос; см. config.sources
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS upstream VARCHAR;
+ALTER TABLE balance_snapshots ADD COLUMN IF NOT EXISTS upstream VARCHAR;
+-- обе оценки стоимости хранятся отдельно, а cost — выбранная по config.cost_mode:
+-- так смена режима пересчитывает историю одним UPDATE, без повторного разбора тел
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS cost_api DOUBLE;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS cost_estimated DOUBLE;
+-- медиа в ответе и признак, что тела уже просмотрены на предмет медиа
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS media_out INTEGER;
+ALTER TABLE requests ADD COLUMN IF NOT EXISTS media_scanned BOOLEAN DEFAULT FALSE;
+
+-- прайс по источникам: у разных апстримов одна модель стоит по-разному.
+-- model_pricing (ключ — только модель) остаётся ради миграции старых баз
+CREATE TABLE IF NOT EXISTS model_prices (
+    upstream        VARCHAR NOT NULL,
+    model           VARCHAR NOT NULL,
+    cost_context    DOUBLE,
+    cost_completion DOUBLE,
+    currency        VARCHAR,
+    updated_at      TIMESTAMP,
+    PRIMARY KEY (upstream, model)
+);
+
+-- галерея: одна строка на уникальную картинку/видео (файл или URL) и направление
+CREATE TABLE IF NOT EXISTS media (
+    key             VARCHAR PRIMARY KEY,
+    direction       VARCHAR,       -- input | output
+    kind            VARCHAR,       -- image | video | audio
+    file            VARCHAR,       -- имя файла в data/media или NULL
+    url             VARCHAR,       -- внешняя ссылка или NULL
+    mime            VARCHAR,
+    bytes           BIGINT,
+    model           VARCHAR,
+    upstream        VARCHAR,
+    prompt          VARCHAR,
+    request_id      BIGINT,        -- где встретилась впервые
+    ts              TIMESTAMP,
+    day             DATE,
+    last_request_id BIGINT,        -- где встретилась последний раз (для ретеншена)
+    last_ts         TIMESTAMP,
+    last_day        DATE,
+    uses            INTEGER DEFAULT 1
 );
 """
 
@@ -145,11 +189,16 @@ def _truncate(text: str | None, limit: int = 400_000) -> str | None:
 
 
 def log_request(entry: dict[str, Any]) -> int:
-    """Записать проксированный запрос, вернуть его id."""
+    """Записать проксированный запрос, вернуть его id.
+
+    `entry["media"]` — найденные в телах медиа (media.Collector.items); пишутся
+    в галерею с привязкой к id запроса.
+    """
     ts = entry.get("ts") or datetime.now(timezone.utc).astimezone().replace(tzinfo=None)
     request_body = _truncate(entry.get("request_body"))
     response_body = _truncate(entry.get("response_body"))
     details = inspect.compact(request_body, response_body)
+    items = entry.get("media") or []
     params = [
         ts,
         ts.date(),
@@ -180,6 +229,11 @@ def log_request(entry: dict[str, Any]) -> int:
         details["reasoning_tokens"],
         details["cached_tokens"],
         True,
+        entry.get("upstream"),
+        entry.get("cost_api"),
+        entry.get("cost_estimated"),
+        details["media_out"],
+        True,
     ]
     with _lock:
         conn = connect()
@@ -190,12 +244,49 @@ def log_request(entry: dict[str, Any]) -> int:
                 client_ip, upstream_id, request_body, response_body, error,
                 prompt_tokens, completion_tokens, total_tokens, cost, cost_source,
                 prompt_preview, answer_preview, reasoning_preview, tools_offered,
-                tools_called, images, finish_reason, reasoning_tokens, cached_tokens, inspected
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                tools_called, images, finish_reason, reasoning_tokens, cached_tokens, inspected,
+                upstream, cost_api, cost_estimated, media_out, media_scanned
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             params,
         )
-        return conn.execute("SELECT currval('seq_request_id')").fetchone()[0]
+        request_id = conn.execute("SELECT currval('seq_request_id')").fetchone()[0]
+        _record_media(conn, items, request_id, ts, entry.get("model"), entry.get("upstream"),
+                      details["prompt_preview"])
+        return request_id
+
+
+def _record_media(
+    conn: duckdb.DuckDBPyConnection,
+    items: list[dict[str, Any]],
+    request_id: int,
+    ts: datetime,
+    model: str | None,
+    upstream: str | None,
+    fallback_prompt: str | None,
+    prompt: str | None = None,
+) -> None:
+    """Добавить медиа в галерею; повторная встреча только сдвигает last_* и счётчик."""
+    for item in items:
+        caption = item.get("prompt") or prompt or fallback_prompt
+        conn.execute(
+            """
+            INSERT INTO media (key, direction, kind, file, url, mime, bytes, model, upstream, prompt,
+                               request_id, ts, day, last_request_id, last_ts, last_day, uses)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            ON CONFLICT (key) DO UPDATE SET
+                last_request_id = excluded.last_request_id,
+                last_ts = excluded.last_ts,
+                last_day = excluded.last_day,
+                uses = media.uses + 1
+            """,
+            [
+                item["key"], item["direction"], item["kind"], item["file"], item["url"],
+                item["mime"], item["bytes"], model, upstream,
+                (caption or "")[:400] or None,
+                request_id, ts, ts.date(), request_id, ts, ts.date(),
+            ],
+        )
 
 
 def backfill_details(limit: int = 5000) -> int:
@@ -228,20 +319,120 @@ def backfill_details(limit: int = 5000) -> int:
     return len(rows)
 
 
-def record_balance(amount: float, source: str = "poll") -> None:
-    ts = datetime.now(timezone.utc).astimezone().replace(tzinfo=None)
+def backfill_media(limit: int = 5000) -> int:
+    """Найти медиа в записях, сделанных до появления галереи.
+
+    Тела старых записей не переписываются: картинка из обрезанного тела всё равно
+    потеряна, а целые data:-ссылки карточка запроса покажет и так.
+    """
+    rows = query(
+        "SELECT id, ts, model, upstream, request_body, response_body FROM requests "
+        "WHERE media_scanned IS NOT TRUE ORDER BY id LIMIT ?",
+        [limit],
+    )
+    for row in rows:
+        _, inputs = media.extract_request(inspect.parse(row["request_body"]))
+        _, outputs = media.extract_response(inspect.parse(row["response_body"]))
+        details = inspect.compact(row["request_body"], row["response_body"])
+        with _lock:
+            conn = connect()
+            _record_media(conn, inputs.items, row["id"], row["ts"], row["model"], row["upstream"],
+                          details["prompt_preview"], inputs.prompt)
+            _record_media(conn, outputs.items, row["id"], row["ts"], row["model"], row["upstream"],
+                          details["prompt_preview"], outputs.prompt)
+            conn.execute(
+                "UPDATE requests SET images = ?, media_out = ?, media_scanned = TRUE WHERE id = ?",
+                [details["images"], details["media_out"], row["id"]],
+            )
+    return len(rows)
+
+
+def migrate(source_id: str) -> None:
+    """Привести записи старых версий к текущей схеме.
+
+    Всё идемпотентно: каждое условие отбирает только ещё не мигрированные строки.
+    """
+    with _lock:
+        conn = connect()
+        if source_id:
+            # до появления источников всё шло через единственный апстрим
+            conn.execute("UPDATE requests SET upstream = ? WHERE upstream IS NULL", [source_id])
+            conn.execute("UPDATE balance_snapshots SET upstream = ? WHERE upstream IS NULL", [source_id])
+            conn.execute(
+                """
+                INSERT INTO model_prices (upstream, model, cost_context, cost_completion, currency, updated_at)
+                SELECT ?, model, cost_context, cost_completion, currency, updated_at FROM model_pricing
+                ON CONFLICT DO NOTHING
+                """,
+                [source_id],
+            )
+            conn.execute("DELETE FROM model_pricing")
+        conn.execute(
+            "UPDATE requests SET cost_api = cost WHERE cost_source = 'api' AND cost_api IS NULL"
+        )
+        conn.execute(
+            "UPDATE requests SET cost_estimated = cost "
+            "WHERE cost_source = 'estimated' AND cost_estimated IS NULL"
+        )
+    fill_estimates()
+
+
+def fill_estimates() -> None:
+    """Оценка по прайсу для записей, где её ещё нет, а токены и цены есть."""
     execute(
-        "INSERT INTO balance_snapshots (ts, day, amount, source) VALUES (?,?,?,?)",
-        [ts, ts.date(), float(amount), source],
+        """
+        UPDATE requests SET cost_estimated =
+            (coalesce(requests.prompt_tokens, 0) * coalesce(p.cost_context, 0)
+             + coalesce(requests.completion_tokens, 0) * coalesce(p.cost_completion, 0)) / 1000000
+        FROM model_prices p
+        WHERE p.model = requests.model AND p.upstream = requests.upstream
+          AND requests.cost_estimated IS NULL
+          AND (coalesce(requests.prompt_tokens, 0) > 0 OR coalesce(requests.completion_tokens, 0) > 0)
+          AND (p.cost_context IS NOT NULL OR p.cost_completion IS NOT NULL)
+        """
     )
 
 
-def latest_balance() -> dict[str, Any] | None:
-    rows = query("SELECT ts, amount, source FROM balance_snapshots ORDER BY ts DESC LIMIT 1")
+_COST_SQL = {
+    "auto": (
+        "coalesce(cost_api, cost_estimated)",
+        "CASE WHEN cost_api IS NOT NULL THEN 'api' WHEN cost_estimated IS NOT NULL THEN 'estimated' END",
+    ),
+    "api": ("cost_api", "CASE WHEN cost_api IS NOT NULL THEN 'api' END"),
+    "pricelist": (
+        "coalesce(cost_estimated, cost_api)",
+        "CASE WHEN cost_estimated IS NOT NULL THEN 'estimated' WHEN cost_api IS NOT NULL THEN 'api' END",
+    ),
+}
+
+
+def recompute_costs(mode: str) -> None:
+    """Пересчитать выбранную стоимость всех записей под режим config.cost_mode."""
+    cost, source = _COST_SQL.get(mode, _COST_SQL["auto"])
+    execute(
+        f"UPDATE requests SET cost = {cost}, cost_source = {source} "
+        f"WHERE cost IS DISTINCT FROM {cost} OR cost_source IS DISTINCT FROM {source}"
+    )
+
+
+def record_balance(amount: float, source: str = "poll", upstream: str | None = None) -> None:
+    ts = datetime.now(timezone.utc).astimezone().replace(tzinfo=None)
+    execute(
+        "INSERT INTO balance_snapshots (ts, day, amount, source, upstream) VALUES (?,?,?,?,?)",
+        [ts, ts.date(), float(amount), source, upstream],
+    )
+
+
+def latest_balance(upstream: str | None = None) -> dict[str, Any] | None:
+    rows = query(
+        "SELECT ts, amount, source FROM balance_snapshots "
+        "WHERE ? IS NULL OR upstream = ? ORDER BY ts DESC LIMIT 1",
+        [upstream, upstream],
+    )
     return rows[0] if rows else None
 
 
-def upsert_model_pricing(models: list[dict[str, Any]]) -> int:
+def upsert_model_pricing(models: list[dict[str, Any]], upstream: str = "") -> int:
     """Обновить кэш цен из ответа GET /v1/models (цены за 1M токенов)."""
     now = datetime.now(timezone.utc).astimezone().replace(tzinfo=None)
     rows = []
@@ -263,11 +454,11 @@ def upsert_model_pricing(models: list[dict[str, Any]]) -> int:
     with _lock:
         conn = connect()
         for row in rows:
-            conn.execute("DELETE FROM model_pricing WHERE model = ?", [row[0]])
             conn.execute(
-                "INSERT INTO model_pricing (model, cost_context, cost_completion, currency, updated_at)"
-                " VALUES (?,?,?,?,?)",
-                row,
+                "INSERT OR REPLACE INTO model_prices"
+                " (upstream, model, cost_context, cost_completion, currency, updated_at)"
+                " VALUES (?,?,?,?,?,?)",
+                [upstream, *row],
             )
     return len(rows)
 
@@ -288,10 +479,11 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
-def model_pricing(model: str) -> dict[str, Any] | None:
+def model_pricing(model: str, upstream: str = "") -> dict[str, Any] | None:
     rows = query(
-        "SELECT model, cost_context, cost_completion, currency FROM model_pricing WHERE model = ?",
-        [model],
+        "SELECT model, cost_context, cost_completion, currency FROM model_prices"
+        " WHERE model = ? AND upstream = ?",
+        [model, upstream],
     )
     return rows[0] if rows else None
 
@@ -306,7 +498,20 @@ def apply_retention(retention_days: int) -> int:
         before = conn.execute("SELECT count(*) FROM requests").fetchone()[0]
         conn.execute("DELETE FROM requests WHERE day < ?", [cutoff])
         conn.execute("DELETE FROM balance_snapshots WHERE day < ?", [cutoff])
+        # медиа живёт, пока его упоминает хоть один оставшийся запрос: last_day — последнее упоминание
+        stale = [r[0] for r in conn.execute(
+            "SELECT DISTINCT file FROM media WHERE last_day < ? AND file IS NOT NULL", [cutoff]
+        ).fetchall()]
+        conn.execute("DELETE FROM media WHERE last_day < ?", [cutoff])
+        # один файл может быть и входом, и результатом — удаляем, только если ссылок не осталось
+        kept = {r[0] for r in conn.execute(
+            "SELECT DISTINCT file FROM media WHERE file IS NOT NULL"
+        ).fetchall()}
         after = conn.execute("SELECT count(*) FROM requests").fetchone()[0]
+    for name in stale:
+        path = media.path_of(name)
+        if name not in kept and path is not None:
+            path.unlink(missing_ok=True)
     return int(before - after)
 
 

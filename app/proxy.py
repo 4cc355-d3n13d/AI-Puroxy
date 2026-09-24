@@ -11,7 +11,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from . import config, db, usage as usage_mod
+from . import config, db, media, usage as usage_mod
 
 # заголовки, которые не пробрасываем в апстрим / клиенту
 _DROP_REQUEST_HEADERS = {
@@ -26,9 +26,10 @@ _DROP_RESPONSE_HEADERS = {
 _client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
 
-# кэш баланса, чтобы не дёргать апстрим на каждый запрос
+# кэш баланса, чтобы не дёргать апстрим на каждый запрос; относится к одному источнику
 _balance_amount: float | None = None
 _balance_checked_at: float = 0.0
+_balance_source: str = ""
 _balance_lock = asyncio.Lock()
 
 
@@ -65,11 +66,14 @@ def upstream_url(cfg: dict[str, Any], subpath: str) -> str:
 
 async def fetch_balance(force: bool = False) -> float | None:
     """Баланс апстрима с кэшем; при force — обязательный запрос к API."""
-    global _balance_amount, _balance_checked_at
+    global _balance_amount, _balance_checked_at, _balance_source
     cfg = config.load()
     if not cfg["api_key"]:
         return None
     async with _balance_lock:
+        if _balance_source != cfg["source"]:
+            # источник переключили — баланс прежнего к новому отношения не имеет
+            _balance_amount, _balance_checked_at, _balance_source = None, 0.0, cfg["source"]
         fresh = (time.monotonic() - _balance_checked_at) < cfg["balance_poll_seconds"]
         if not force and fresh and _balance_amount is not None:
             return _balance_amount
@@ -86,26 +90,28 @@ async def fetch_balance(force: bool = False) -> float | None:
         if amount is not None:
             _balance_amount = amount
             _balance_checked_at = time.monotonic()
-            db.record_balance(amount, source="poll")
+            db.record_balance(amount, source="poll", upstream=cfg["source"])
         return _balance_amount
 
 
-def observe_balance(amount: float, source: str = "proxy") -> None:
+def observe_balance(amount: float, source: str = "proxy", upstream: str = "") -> None:
     """Зафиксировать баланс, увиденный при проксировании GET /v1/balance."""
-    global _balance_amount, _balance_checked_at
+    global _balance_amount, _balance_checked_at, _balance_source
     _balance_amount = amount
     _balance_checked_at = time.monotonic()
-    db.record_balance(amount, source=source)
+    _balance_source = upstream
+    db.record_balance(amount, source=source, upstream=upstream)
 
 
 def cached_balance() -> float | None:
-    return _balance_amount
+    """Баланс активного источника, если он известен."""
+    return _balance_amount if _balance_source == config.load()["source"] else None
 
 
 def _apply_local_cost(cost: float | None) -> None:
     """Уменьшить кэш баланса на стоимость запроса, чтобы предупреждение было актуальным."""
     global _balance_amount
-    if cost and _balance_amount is not None:
+    if cost and cached_balance() is not None:
         _balance_amount = max(0.0, _balance_amount - cost)
 
 
@@ -114,7 +120,7 @@ def balance_warning(cfg: dict[str, Any]) -> str | None:
     threshold = cfg["balance_threshold"]
     if not threshold or threshold <= 0:
         return None
-    amount = _balance_amount
+    amount = cached_balance()
     if amount is None or amount >= threshold:
         return None
     return (
@@ -357,8 +363,13 @@ async def handle(request: Request, subpath: str) -> Response:
         "model": model,
         "stream": is_stream,
         "client_ip": request.client.host if request.client else None,
+        "upstream": cfg["source"],
         "request_body": body.decode("utf-8", "replace") if body else None,
     }
+    # в апстрим уходит исходное тело; в лог — со встроенными картинками, вынесенными в файлы
+    rewritten, inputs = media.extract_request(request_payload)
+    entry["request_body"] = media.rewrite_body(entry["request_body"], request_payload, rewritten, inputs)
+    _attach_media(entry, inputs)
 
     started = time.perf_counter()
     client = await get_client()
@@ -409,13 +420,16 @@ async def handle(request: Request, subpath: str) -> Response:
 
     response_payload = _parse_json(raw)
     entry["response_body"] = raw.decode("utf-8", "replace") if raw else None
+    rewritten, outputs = media.extract_response(response_payload)
+    entry["response_body"] = media.rewrite_body(entry["response_body"], response_payload, rewritten, outputs)
+    _attach_media(entry, outputs)
     if not entry["model"]:
         entry["model"] = _model_from(response_payload)
     if isinstance(response_payload, dict) and isinstance(response_payload.get("id"), str):
         entry["upstream_id"] = response_payload["id"]
 
     entry.update(usage_mod.extract_usage(response_payload))
-    usage_mod.fill_cost(entry)
+    usage_mod.fill_cost(entry, cfg["cost_mode"])
     if upstream.status_code >= 400:
         entry["error"] = _error_text(response_payload) or f"HTTP {upstream.status_code}"
 
@@ -429,6 +443,14 @@ async def handle(request: Request, subpath: str) -> Response:
 
     db.log_request(entry)
     return Response(content=raw, status_code=upstream.status_code, headers=out_headers, media_type=content_type or None)
+
+
+def _attach_media(entry: dict[str, Any], collector: media.Collector) -> None:
+    """Добавить найденные медиа к записи; подпись для галереи — промпт, если он есть."""
+    items = entry.setdefault("media", [])
+    prompt = collector.prompt or next((i.get("prompt") for i in items if i.get("prompt")), None)
+    for item in collector.items:
+        items.append({**item, "prompt": prompt})
 
 
 def _error_text(payload: Any) -> str | None:
@@ -448,11 +470,14 @@ def _post_process(endpoint: str, payload: Any, entry: dict[str, Any]) -> None:
     if endpoint == "v1/models" and isinstance(payload, dict):
         models = payload.get("data")
         if isinstance(models, list):
-            db.upsert_model_pricing([m for m in models if isinstance(m, dict)])
+            db.upsert_model_pricing([m for m in models if isinstance(m, dict)], entry.get("upstream") or "")
+            # появились цены — у прошлых запросов этих моделей появляется и оценка
+            db.fill_estimates()
+            db.recompute_costs(config.load()["cost_mode"])
     elif endpoint == "v1/balance":
         amount = usage_mod.parse_balance(payload)
         if amount is not None:
-            observe_balance(amount, source="proxy")
+            observe_balance(amount, source="proxy", upstream=entry.get("upstream") or "")
     _apply_local_cost(entry.get("cost"))
 
 
@@ -527,7 +552,7 @@ async def _stream_response(
         entry["duration_ms"] = (time.perf_counter() - started) * 1000
         entry["error"] = error or (None if upstream.status_code < 400 else f"HTTP {upstream.status_code}")
         entry.update(usage_mod.merge_stream_usage(parsed_chunks))
-        usage_mod.fill_cost(entry)
+        usage_mod.fill_cost(entry, cfg["cost_mode"])
         entry["response_body"] = json.dumps(
             {
                 "stream": True,

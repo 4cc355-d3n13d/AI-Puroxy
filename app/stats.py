@@ -18,6 +18,9 @@ def _where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     if filters.get("endpoint"):
         clauses.append("endpoint = ?")
         params.append(filters["endpoint"])
+    if filters.get("upstream"):
+        clauses.append("upstream = ?")
+        params.append(filters["upstream"])
     status = filters.get("status")
     if status == "ok":
         clauses.append("status_code < 400")
@@ -29,7 +32,7 @@ def _where(filters: dict[str, Any]) -> tuple[str, list[Any]]:
     elif kind == "reasoning":
         clauses.append("coalesce(reasoning_tokens, 0) > 0 OR reasoning_preview IS NOT NULL")
     elif kind == "images":
-        clauses.append("coalesce(images, 0) > 0")
+        clauses.append("(coalesce(images, 0) > 0 OR coalesce(media_out, 0) > 0)")
     elif kind == "stream":
         clauses.append("stream IS TRUE")
     if filters.get("date_from"):
@@ -58,7 +61,7 @@ def requests_page(filters: dict[str, Any], page: int = 1, page_size: int = 50) -
         SELECT id, ts, day, method, path, endpoint, model, stream, status_code, duration_ms,
                prompt_tokens, completion_tokens, total_tokens, cost, cost_source, error,
                prompt_preview, answer_preview, reasoning_preview, tools_offered, tools_called,
-               images, finish_reason, reasoning_tokens, cached_tokens,
+               images, media_out, upstream, finish_reason, reasoning_tokens, cached_tokens,
                length(coalesce(request_body,'')) AS request_size,
                length(coalesce(response_body,'')) AS response_size
         FROM requests{where}
@@ -94,7 +97,10 @@ def filter_options() -> dict[str, Any]:
     endpoints = db.query(
         "SELECT endpoint, count(*) AS n FROM requests WHERE endpoint IS NOT NULL GROUP BY endpoint ORDER BY n DESC"
     )
-    return {"models": models, "endpoints": endpoints}
+    upstreams = db.query(
+        "SELECT upstream, count(*) AS n FROM requests WHERE upstream IS NOT NULL GROUP BY upstream ORDER BY n DESC"
+    )
+    return {"models": models, "endpoints": endpoints, "upstreams": upstreams}
 
 
 def daily_model_counts(days: int = 30, model: str | None = None) -> dict[str, Any]:
@@ -170,17 +176,17 @@ def month_bounds(month: str | None) -> tuple[date, date]:
     return first, next_month - timedelta(days=1)
 
 
-def balance_calendar(month: str | None = None) -> dict[str, Any]:
-    """Календарь трат за месяц + баланс на конец каждого дня."""
+def balance_calendar(month: str | None = None, upstream: str | None = None) -> dict[str, Any]:
+    """Календарь трат за месяц + баланс на конец каждого дня (по одному источнику)."""
     first, last = month_bounds(month)
     spend = db.query(
         """
         SELECT day, coalesce(sum(cost), 0) AS cost, count(*) AS requests
         FROM requests
-        WHERE day BETWEEN ? AND ?
+        WHERE day BETWEEN ? AND ? AND (? IS NULL OR upstream = ?)
         GROUP BY day ORDER BY day
         """,
-        [first, last],
+        [first, last, upstream, upstream],
     )
     snapshots = db.query(
         """
@@ -190,10 +196,10 @@ def balance_calendar(month: str | None = None) -> dict[str, Any]:
                arg_min(amount, ts) AS first_amount,
                arg_max(amount, ts) AS last_amount
         FROM balance_snapshots
-        WHERE day BETWEEN ? AND ?
+        WHERE day BETWEEN ? AND ? AND (? IS NULL OR upstream = ?)
         GROUP BY day ORDER BY day
         """,
-        [first, last],
+        [first, last, upstream, upstream],
     )
     snap_by_day = {row["day"].isoformat(): row for row in snapshots}
     days = []
@@ -227,8 +233,8 @@ def balance_calendar(month: str | None = None) -> dict[str, Any]:
     }
 
 
-def day_breakdown(day: str) -> dict[str, Any]:
-    """Детализация трат за день по моделям."""
+def day_breakdown(day: str, upstream: str | None = None) -> dict[str, Any]:
+    """Детализация трат за день по моделям (по одному источнику)."""
     rows = db.query(
         """
         SELECT coalesce(model, '—') AS model,
@@ -238,26 +244,27 @@ def day_breakdown(day: str) -> dict[str, Any]:
                coalesce(sum(completion_tokens), 0) AS completion_tokens,
                sum(CASE WHEN cost_source = 'estimated' THEN 1 ELSE 0 END) AS estimated
         FROM requests
-        WHERE day = ?
+        WHERE day = ? AND (? IS NULL OR upstream = ?)
         GROUP BY model
         ORDER BY cost DESC, requests DESC
         """,
-        [day],
+        [day, upstream, upstream],
     )
     endpoints = db.query(
         """
         SELECT endpoint, count(*) AS requests, coalesce(sum(cost), 0) AS cost
-        FROM requests WHERE day = ? GROUP BY endpoint ORDER BY requests DESC
+        FROM requests WHERE day = ? AND (? IS NULL OR upstream = ?)
+        GROUP BY endpoint ORDER BY requests DESC
         """,
-        [day],
+        [day, upstream, upstream],
     )
     # фактическое изменение баланса за день — учитывает и то, что API не тарифицирует в ответе
     snapshot = db.query(
         """
         SELECT arg_min(amount, ts) AS first_amount, arg_max(amount, ts) AS last_amount, count(*) AS n
-        FROM balance_snapshots WHERE day = ?
+        FROM balance_snapshots WHERE day = ? AND (? IS NULL OR upstream = ?)
         """,
-        [day],
+        [day, upstream, upstream],
     )[0]
     balance_delta = None
     if snapshot["n"] and snapshot["n"] > 1:
@@ -297,6 +304,48 @@ def overview() -> dict[str, Any]:
         "models": int(row["models"] or 0),
         "today_requests": int(today["requests"]),
         "today_cost": float(today["cost"]),
+    }
+
+
+def media_page(filters: dict[str, Any], page: int = 1, page_size: int = 60) -> dict[str, Any]:
+    """Галерея: уникальные картинки/видео, свежие сверху."""
+    page = max(1, int(page or 1))
+    page_size = min(MAX_PAGE_SIZE, max(1, int(page_size or 60)))
+    clauses: list[str] = []
+    params: list[Any] = []
+    for key in ("direction", "kind", "model"):
+        if filters.get(key):
+            clauses.append(f"{key} = ?")
+            params.append(filters[key])
+    if filters.get("q"):
+        clauses.append("(coalesce(prompt, '') ILIKE ? OR coalesce(model, '') ILIKE ?)")
+        params.extend([f"%{filters['q']}%"] * 2)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    total = int(db.query(f"SELECT count(*) AS n FROM media{where}", params)[0]["n"])
+    rows = db.query(
+        f"""
+        SELECT key, direction, kind, file, url, mime, bytes, model, upstream, prompt,
+               request_id, ts, last_request_id, last_ts, uses
+        FROM media{where}
+        ORDER BY ts DESC, key
+        LIMIT ? OFFSET ?
+        """,
+        [*params, page_size, (page - 1) * page_size],
+    )
+    for row in rows:
+        row["src"] = f"/_media/{row['file']}" if row["file"] else row["url"]
+    models = db.query(
+        "SELECT model, count(*) AS n FROM media WHERE model IS NOT NULL GROUP BY model ORDER BY n DESC"
+    )
+    counts = db.query("SELECT direction, count(*) AS n FROM media GROUP BY direction")
+    return {
+        "items": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+        "models": models,
+        "counts": {row["direction"]: int(row["n"]) for row in counts},
     }
 
 

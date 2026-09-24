@@ -3,17 +3,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import signal
 import sys
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import config, db, docsrc, proxy, stats
+from . import config, db, docsrc, media, proxy, stats
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -35,8 +37,12 @@ async def _startup() -> None:
         # без трейсбека: причина понятна и требует действия пользователя, а не отладки
         print(error, file=sys.stderr, flush=True)
         raise SystemExit(1) from None
-    db.backfill_details()  # разбор тел у записей, сделанных до появления этих полей
+    _remember_listen_address()
     cfg = config.load()
+    db.migrate(cfg["source"])  # источники и раздельные суммы у записей прежних версий
+    db.backfill_details()  # разбор тел у записей, сделанных до появления этих полей
+    db.backfill_media()  # картинки из записей, сделанных до появления галереи
+    db.recompute_costs(cfg["cost_mode"])
     db.apply_retention(cfg["retention_days"])
     _background.append(asyncio.create_task(_maintenance_loop()))
 
@@ -82,14 +88,74 @@ def _static_version() -> str:
 
 def _page_context(request: Request, active: str) -> dict[str, Any]:
     cfg = config.load()
+    source = config.find_source(cfg, cfg["source"])
     return {
         "request": request,
         "active": active,
         "configured": config.is_configured(),
         "base_url": cfg["base_url"],
         "balance_threshold": cfg["balance_threshold"],
+        "sources": cfg["sources"],
+        "source_names": {s["id"]: s["name"] for s in cfg["sources"]},
+        "active_source_name": source["name"] if source else "",
         "v": _static_version(),
     }
+
+
+def _launch_address() -> tuple[str, int | None]:
+    """Адрес, на котором запущен процесс.
+
+    `python -m app` и run.sh выставляют AI_PROXY_LISTEN; сервисы прежних версий
+    запускали `uvicorn … --host H --port P` — тогда адрес берётся из аргументов.
+    """
+    listen = os.environ.get("AI_PROXY_LISTEN", "")
+    if ":" in listen:
+        host, port = listen.rsplit(":", 1)
+        return host, int(port) if port.isdigit() else None
+    args = sys.argv[1:]
+    found: dict[str, str] = {}
+    for index, arg in enumerate(args):
+        for key in ("--host", "--port"):
+            if arg == key and index + 1 < len(args):
+                found[key] = args[index + 1]
+            elif arg.startswith(key + "="):
+                found[key] = arg.split("=", 1)[1]
+    port = found.get("--port", "")
+    return found.get("--host", ""), int(port) if port.isdigit() else None
+
+
+def _listen_address(request: Request) -> tuple[str, int | None]:
+    """Фактический адрес; если он неизвестен, порт берётся из сокета."""
+    host, port = _launch_address()
+    if port is None:
+        server = request.scope.get("server") or (None, None)
+        port = server[1]
+    return host, port
+
+
+def _remember_listen_address() -> None:
+    """Записать фактический адрес в настройки, если там его ещё нет.
+
+    У сервиса прежней версии адрес жил только в plist, а в настройках стояло
+    значение по умолчанию 127.0.0.1: первое же сохранение формы записало бы его,
+    и после перезапуска сервис молча пропал бы из локальной сети.
+    """
+    stored = config.stored_keys()
+    if not config.CONFIG_PATH.exists() or {"host", "port"} <= stored:
+        return
+    host, port = _launch_address()
+    values = {}
+    if "host" not in stored and host:
+        values["host"] = host
+    if "port" not in stored and port:
+        values["port"] = port
+    if values:
+        config.save(values)
+
+
+def _can_restart() -> bool:
+    """Перезапуститься можно только под сервисом: launchd/systemd поднимут процесс сами."""
+    return os.environ.get("AI_PROXY_SERVICE") == "1"
 
 
 # --------------------------------------------------------------------------- страницы
@@ -110,6 +176,11 @@ async def balance_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "balance.html", _page_context(request, "balance"))
 
 
+@app.get("/images", response_class=HTMLResponse)
+async def images_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "images.html", _page_context(request, "images"))
+
+
 @app.get("/models", response_class=HTMLResponse)
 async def models_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "models.html", _page_context(request, "models"))
@@ -118,11 +189,21 @@ async def models_page(request: Request) -> HTMLResponse:
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
     cfg = config.load()
+    listen_host, listen_port = _listen_address(request)
     context = _page_context(request, "settings")
     context.update(
         {
             "cfg": cfg,
-            "masked_key": config.masked_key(cfg["api_key"]),
+            "source_rows": [
+                {**source, "masked_key": config.masked_key(source["api_key"])} for source in cfg["sources"]
+            ],
+            "cost_modes": config.COST_MODES,
+            "listen_host": listen_host,
+            "listen_port": listen_port,
+            "restart_needed": listen_port is not None and (
+                listen_port != cfg["port"] or bool(listen_host and listen_host != cfg["host"])
+            ),
+            "can_restart": _can_restart(),
             "saved": bool(saved),
             "db_path": str(config.DB_PATH),
             "db_size": stats.db_size_bytes(),
@@ -133,39 +214,55 @@ async def settings_page(request: Request, saved: int = 0) -> HTMLResponse:
 
 
 @app.post("/settings", response_class=HTMLResponse)
-async def settings_save(
-    request: Request,
-    api_key: str = Form(""),
-    base_url: str = Form(config.DEFAULTS["base_url"]),
-    retention_days: str = Form("0"),
-    balance_threshold: str = Form("0"),
-    docs_domain: str = Form("localhost"),
-    balance_poll_seconds: str = Form("300"),
-) -> Response:
+async def settings_save(request: Request) -> Response:
+    form = await request.form()
     current = config.load()
-    # пустое поле ключа означает «оставить как есть»
-    values = {
-        "api_key": api_key.strip() or current["api_key"],
-        "base_url": base_url.strip() or config.DEFAULTS["base_url"],
-        "retention_days": _to_number(retention_days, 0, integer=True),
-        "balance_threshold": _to_number(balance_threshold, 0.0),
-        "docs_domain": docs_domain.strip() or "localhost",
-        "balance_poll_seconds": _to_number(balance_poll_seconds, 300, integer=True),
+    values: dict[str, Any] = {
+        key: str(form.get(key) or "").strip()
+        for key in ("retention_days", "balance_threshold", "docs_domain", "balance_poll_seconds",
+                    "host", "port", "cost_mode")
+        if key in form
     }
+    if "src_url" in form:
+        values.update(_sources_from_form(form, current))
+    elif "base_url" in form or "api_key" in form:
+        # прежний вид формы (один источник): пустой ключ означает «оставить как есть»
+        values["api_key"] = str(form.get("api_key") or "").strip() or current["api_key"]
+        values["base_url"] = (str(form.get("base_url") or "").strip()
+                              or current["base_url"] or config.DEFAULT_BASE_URL)
+
     cfg = config.save(values)
     db.apply_retention(cfg["retention_days"])
+    if cfg["cost_mode"] != current["cost_mode"]:
+        db.recompute_costs(cfg["cost_mode"])
     docsrc._raw.cache_clear()
     if config.is_configured():
         await proxy.fetch_balance(force=True)
     return RedirectResponse("/settings?saved=1", status_code=303)
 
 
-def _to_number(raw: str, default: float, integer: bool = False) -> float | int:
-    try:
-        value = float(str(raw).replace(",", ".").strip())
-    except (TypeError, ValueError):
-        return default
-    return int(value) if integer else value
+def _sources_from_form(form: Any, current: dict[str, Any]) -> dict[str, Any]:
+    """Список источников из строк формы. Пустой ключ у существующего источника — «не менять»."""
+    ids, names = form.getlist("src_id"), form.getlist("src_name")
+    urls, keys = form.getlist("src_url"), form.getlist("src_key")
+    deleted = set(form.getlist("src_delete"))
+    active_row = str(form.get("active_source") or "")
+    known = {source["id"]: source for source in current["sources"]}
+
+    sources = []
+    for index, url in enumerate(urls):
+        source_id = str(ids[index]) if index < len(ids) else ""
+        url = str(url).strip()
+        if str(index) in deleted or not url:
+            continue
+        key = str(keys[index] if index < len(keys) else "").strip()
+        if not key and source_id in known:
+            key = known[source_id]["api_key"]
+        name = str(names[index] if index < len(names) else "").strip()
+        # новому источнику id назначит config; существующий сохраняет свой — на нём история
+        sources.append({"id": source_id, "name": name, "base_url": url, "api_key": key,
+                        "active": active_row == str(index)})
+    return {"sources": sources, "active_source": ""}
 
 
 @app.get("/docs", response_class=HTMLResponse)
@@ -196,7 +293,7 @@ async def api_overview() -> JSONResponse:
     balance = proxy.cached_balance()
     if balance is None and config.is_configured():
         balance = await proxy.fetch_balance()
-    latest = db.latest_balance()
+    latest = db.latest_balance(cfg["source"])
     return JSONResponse(
         stats.jsonable(
             {
@@ -204,6 +301,7 @@ async def api_overview() -> JSONResponse:
                 "balance": balance,
                 "balance_checked_at": latest["ts"] if latest else None,
                 "balance_threshold": cfg["balance_threshold"],
+                "source": cfg["source"],
                 "configured": config.is_configured(),
                 "low_balance": bool(
                     cfg["balance_threshold"] and balance is not None and balance < cfg["balance_threshold"]
@@ -217,6 +315,7 @@ async def api_overview() -> JSONResponse:
 async def api_requests(
     model: str = "",
     endpoint: str = "",
+    upstream: str = "",
     status: str = "",
     kind: str = "",
     q: str = "",
@@ -228,6 +327,7 @@ async def api_requests(
     filters = {
         "model": model or None,
         "endpoint": endpoint or None,
+        "upstream": upstream or None,
         "status": status or None,
         "kind": kind or None,
         "q": q or None,
@@ -262,22 +362,54 @@ async def api_models() -> JSONResponse:
 
 @app.get("/_api/balance/calendar")
 async def api_balance_calendar(month: str = "") -> JSONResponse:
-    data = stats.balance_calendar(month or None)
+    source = config.load()["source"] or None
+    data = stats.balance_calendar(month or None, source)
     data["balance"] = proxy.cached_balance()
-    latest = db.latest_balance()
+    latest = db.latest_balance(source)
     data["balance_checked_at"] = latest["ts"] if latest else None
     return JSONResponse(stats.jsonable(data))
 
 
 @app.get("/_api/balance/day/{day}")
 async def api_balance_day(day: str) -> JSONResponse:
-    return JSONResponse(stats.jsonable(stats.day_breakdown(day)))
+    return JSONResponse(stats.jsonable(stats.day_breakdown(day, config.load()["source"] or None)))
 
 
 @app.post("/_api/balance/refresh")
 async def api_balance_refresh() -> JSONResponse:
     amount = await proxy.fetch_balance(force=True)
     return JSONResponse({"balance": amount, "checked_at": str(date.today())})
+
+
+@app.get("/_api/media")
+async def api_media(
+    direction: str = "", kind: str = "", model: str = "", q: str = "", page: int = 1, page_size: int = 60
+) -> JSONResponse:
+    filters = {"direction": direction or None, "kind": kind or None, "model": model or None, "q": q or None}
+    return JSONResponse(stats.jsonable(stats.media_page(filters, page, page_size)))
+
+
+@app.get("/_media/{name}")
+async def media_file(name: str) -> Response:
+    path = media.path_of(name)
+    if path is None or not path.is_file():
+        return JSONResponse({"error": "not found"}, status_code=404)
+    # имя — хэш содержимого, поэтому файл по этому адресу никогда не меняется
+    return FileResponse(path, media_type=media.mime_of_file(name),
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.post("/_api/restart")
+async def api_restart() -> JSONResponse:
+    """Завершить процесс, чтобы сервис поднял его с новыми адресом и портом."""
+    if not _can_restart():
+        return JSONResponse(
+            {"error": "Прокси запущен не сервисом — перезапустите его вручную."}, status_code=409
+        )
+    cfg = config.load()
+    # ответ должен успеть уйти до остановки; SIGTERM даёт uvicorn штатно закрыть базу
+    asyncio.get_running_loop().call_later(0.5, os.kill, os.getpid(), signal.SIGTERM)
+    return JSONResponse({"ok": True, "host": cfg["host"], "port": cfg["port"]})
 
 
 # --------------------------------------------------------------------------- прокси
