@@ -30,8 +30,9 @@
 
 | Параметр                | Описание                                      |
 | ----------------------- | --------------------------------------------- |
-| `model`, `endpoint`     | Точное совпадение                             |
+| `model`, `endpoint`, `upstream` | Точное совпадение (`upstream` — id источника) |
 | `status`                | `ok` (< 400) или `error` (≥ 400 либо есть `error`) |
+| `kind`                  | `tools`, `reasoning`, `images` (картинки в запросе или ответе), `stream` |
 | `q`                     | Подстрока в теле запроса/ответа, модели или пути (`ILIKE`) |
 | `date_from`, `date_to`  | Границы по `day`, включительно                |
 | `page`, `page_size`     | Страница с 1, размер до 200                   |
@@ -45,7 +46,13 @@
 
 ## `GET /_api/requests/{id}`
 
-Полная запись, включая `request_body` и `response_body`. `404`, если записи нет.
+Полная запись, включая `request_body` и `response_body`, обе суммы стоимости
+(`cost_api`, `cost_estimated`) и разбор `summary`. `404`, если записи нет.
+
+В `summary.request.messages[]` у сообщений есть `media` — ссылки на картинки для браузера
+(`/_media/…`, внешний URL или `data:` у старых записей); `images` — сколько их было в теле,
+включая не сохранившиеся. В `summary.response` — `images` (сгенерированные картинки)
+и `media.urls` (результаты медиа-задачи).
 
 Для стриминга `response_body` — это JSON:
 
@@ -56,7 +63,8 @@
 ## `GET /_api/filters`
 
 Значения для выпадающих списков с количествами:
-`{"models": [{"model": "...", "n": 9}], "endpoints": [{"endpoint": "...", "n": 12}]}`.
+`{"models": [{"model": "...", "n": 9}], "endpoints": [{"endpoint": "...", "n": 12}],
+"upstreams": [{"upstream": "speshu-ai", "n": 600}]}`.
 
 ## `GET /_api/chart`
 
@@ -115,10 +123,40 @@ first_used, last_used`.
 * `balance_delta` — `balance_start - balance_end`, то есть положительное значение
   означает траты. `null`, если за день меньше двух снимков баланса.
 
+Баланс и траты на `/balance` относятся к активному источнику.
+
 ## `POST /_api/balance/refresh`
 
 Принудительно запрашивает баланс у апстрима и пишет снимок.
 Отвечает `{"balance": 1851.73, "checked_at": "2026-08-15"}`.
+
+## `GET /_api/media`
+
+Галерея. Параметры: `direction` (`input` | `output`), `kind` (`image` | `video` | `audio`),
+`model`, `q` (подстрока промпта или модели), `page`, `page_size` (до 200).
+
+```json
+{"items": [{"key": "output:https://…", "direction": "output", "kind": "image",
+            "src": "https://…/result.webp", "file": null, "url": "https://…",
+            "model": "google/nano-banana", "prompt": "…", "request_id": 606,
+            "ts": "2026-08-21 21:41:34", "uses": 1, "bytes": null}],
+ "total": 21, "page": 1, "page_size": 60, "pages": 1,
+ "models": [{"model": "z-image", "n": 9}], "counts": {"output": 15, "input": 6}}
+```
+
+`src` — готовая ссылка: `/_media/<файл>` для сохранённых, иначе внешний URL.
+
+## `GET /_media/{name}`
+
+Сохранённый файл из `data/media/`. Имя — 32 шестнадцатеричных символа и расширение;
+другие имена (в том числе с `..`) дают `404`. Отдаётся с `Cache-Control: immutable`:
+имя — хэш содержимого.
+
+## `POST /_api/restart`
+
+Завершает процесс, чтобы сервис поднял его с адресом и портом из настроек.
+Работает только под сервисом (`AI_PROXY_SERVICE=1`), иначе `409` с объяснением.
+Ответ: `{"ok": true, "host": "0.0.0.0", "port": 8787}` — отправляется до остановки.
 
 ---
 
@@ -126,7 +164,8 @@ first_used, last_used`.
 
 | Страница   | Параметры                                                    |
 | ---------- | ------------------------------------------------------------ |
-| `/monitor` | `model`, `endpoint`, `status`, `q`, `day` — подставляются в фильтры и синхронизируются обратно в адресную строку |
+| `/monitor` | `model`, `endpoint`, `upstream`, `status`, `kind`, `q`, `day`, `request` — подставляются в фильтры и синхронизируются обратно в адресную строку |
+| `/images`  | `direction`, `kind`, `model`, `q`, `page`                     |
 | `/balance` | `month` (`YYYY-MM`), `day` (`YYYY-MM-DD`) — выбранный день в календаре |
 | `/docs`    | Редирект на первую страницу; `/docs/{slug}` — конкретная      |
 | `/settings`| `saved=1` — показать подтверждение сохранения                 |
