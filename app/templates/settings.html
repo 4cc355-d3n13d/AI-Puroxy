@@ -29,21 +29,23 @@
     <section class="card">
       <div class="card-head">
         <span class="card-title">Источники ИИ-API</span>
-        <span class="subtle small">запросы идут в отмеченный</span>
+        <span class="subtle small">у каждого свой адрес; отмеченный — по умолчанию для <code>/v1</code></span>
       </div>
       <div class="card-body">
-        <div class="sources" id="sources">
+        <div class="sources" id="sources" data-base="{{ proxy_base }}">
           <div class="source-head small subtle">
-            <span></span><span>Название</span><span>Base URL</span><span>API-ключ</span><span></span>
+            <span title="по умолчанию">★</span><span>Название</span><span>Префикс</span><span>Base URL</span><span>API-ключ</span><span></span>
           </div>
           {% for source in source_rows %}
           <div class="source-row">
             <input type="hidden" name="src_id" value="{{ source.id }}">
-            <label class="source-active" title="Активный источник">
+            <label class="source-active" title="По умолчанию: сюда идут запросы на /v1 без префикса">
               <input type="radio" name="active_source" value="{{ loop.index0 }}"
                      {% if source.id == cfg.active_source %}checked{% endif %}>
             </label>
             <input type="text" name="src_name" value="{{ source.name }}" placeholder="название" spellcheck="false">
+            <input type="text" name="src_prefix" value="{{ source.prefix }}" placeholder="{{ source.id }}" spellcheck="false"
+                   pattern="[a-zA-Z0-9-]*" title="латиница, цифры и дефис">
             <input type="text" name="src_url" value="{{ source.base_url }}" placeholder="https://api.example.com/api" spellcheck="false">
             <input type="password" name="src_key" autocomplete="off" spellcheck="false"
                    placeholder="{{ source.masked_key or 'sk-…' }}"
@@ -51,31 +53,43 @@
             <label class="source-del" title="Удалить источник">
               <input type="checkbox" name="src_delete" value="{{ loop.index0 }}"><span>✕</span>
             </label>
+            <div class="source-url small">
+              <span class="subtle">base URL для клиента:</span>
+              <code class="source-endpoint">{{ proxy_base }}/{{ source.prefix }}/v1</code>
+              {% if source.id == cfg.active_source %}<span class="subtle">или</span> <code>{{ proxy_base }}/v1</code>{% endif %}
+            </div>
           </div>
           {% endfor %}
         </div>
         <template id="source-template">
           <div class="source-row is-new">
             <input type="hidden" name="src_id" value="">
-            <label class="source-active" title="Активный источник">
+            <label class="source-active" title="По умолчанию: сюда идут запросы на /v1 без префикса">
               <input type="radio" name="active_source" value="">
             </label>
             <input type="text" name="src_name" placeholder="название" spellcheck="false">
+            <input type="text" name="src_prefix" placeholder="по хосту" spellcheck="false"
+                   pattern="[a-zA-Z0-9-]*" title="латиница, цифры и дефис">
             <input type="text" name="src_url" placeholder="https://api.example.com/api" spellcheck="false">
             <input type="password" name="src_key" autocomplete="off" spellcheck="false" placeholder="sk-…">
             <label class="source-del" title="Удалить источник">
               <input type="checkbox" name="src_delete" value=""><span>✕</span>
             </label>
+            <div class="source-url small">
+              <span class="subtle">base URL для клиента:</span>
+              <code class="source-endpoint">появится после сохранения</code>
+            </div>
           </div>
         </template>
         <div class="form-actions">
           <button type="button" class="ghost" id="add-source">+ Добавить источник</button>
         </div>
         <p class="hint-block">
-          Ключ подставляется в <code>Authorization: Bearer …</code> ко всем проксируемым запросам.
-          У сохранённого источника пустое поле ключа означает «не менять». Base URL — без
-          завершающего слэша, пути добавляются как <code>/v1/…</code>. Баланс, прайс и календарь
-          трат ведутся по каждому источнику отдельно.
+          Клиенту достаточно указать base URL источника — ключ подставит прокси.
+          Запросы на <code>/v1/…</code> без префикса идут в источник по умолчанию (★).
+          Префикс — латиница, цифры и дефис; пусто — по хосту base URL; совпадающий со служебным
+          путём или с другим источником получит суффикс. У сохранённого источника пустое поле
+          ключа означает «не менять». Баланс, прайс и календарь трат ведутся по каждому источнику.
         </p>
       </div>
     </section>
@@ -208,7 +222,7 @@
     <div class="card-body">
       <div class="kv"><span>Статус</span>
         <b>{% if configured %}<span class="tag ok">настроен</span>{% else %}<span class="tag err">не настроен</span>{% endif %}</b></div>
-      <div class="kv"><span>Источник</span><b>{{ active_source_name or '—' }}</b></div>
+      <div class="kv"><span>По умолчанию</span><b>{{ active_source_name or '—' }}</b></div>
       <div class="kv"><span>Запросов в базе</span><b class="num">{{ overview.requests }}</b></div>
       <div class="kv"><span>Моделей</span><b class="num">{{ overview.models }}</b></div>
       <div class="kv"><span>Файл базы</span><b class="mono small">{{ db_path }}</b></div>
@@ -220,7 +234,7 @@
     <div class="card-body small">
       <p class="subtle" style="margin-top:0">Замените базовый URL в своём клиенте — ключ подставит прокси:</p>
       <pre class="mono" style="background:var(--surface-2);padding:10px;border-radius:6px;overflow:auto">curl http://localhost:{{ listen_port or cfg.port }}/v1/models</pre>
-      <p class="subtle">Совместимы оба префикса: <code>/v1/…</code> и <code>/api/v1/…</code>.</p>
+      <p class="subtle">Совместимы оба пути: <code>/v1/…</code> и <code>/api/v1/…</code>. Другой источник — через его префикс: <code>/&lt;префикс&gt;/v1/…</code>.</p>
     </div>
   </aside>
 </form>

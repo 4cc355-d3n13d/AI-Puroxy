@@ -64,8 +64,7 @@ async def _maintenance_loop() -> None:
     while True:
         cfg = config.load()
         try:
-            if config.is_configured():
-                await proxy.fetch_balance(force=True)
+            await proxy.fetch_all_balances()
             db.apply_retention(cfg["retention_days"])
         except Exception:  # фоновая задача не должна падать
             pass
@@ -99,6 +98,7 @@ def _page_context(request: Request, active: str) -> dict[str, Any]:
         "sources": cfg["sources"],
         "source_names": {s["id"]: s["name"] for s in cfg["sources"]},
         "active_source_name": source["name"] if source else "",
+        "cfg_source": cfg["source"],
         "brand_name": cfg["brand_name"],
         "brand_mark": cfg["brand_mark"],
         "logo_url": brand.logo_url(cfg),
@@ -202,6 +202,8 @@ async def settings_page(request: Request, saved: int = 0, error: str = "") -> HT
                 {**source, "masked_key": config.masked_key(source["api_key"])} for source in cfg["sources"]
             ],
             "cost_modes": config.COST_MODES,
+            # адрес прокси, как его видит браузер, — для готовых base URL источников
+            "proxy_base": f"{request.url.scheme}://{request.url.netloc}",
             "listen_host": listen_host,
             "listen_port": listen_port,
             "restart_needed": listen_port is not None and (
@@ -252,8 +254,7 @@ async def settings_save(request: Request) -> Response:
     if cfg["cost_mode"] != current["cost_mode"]:
         db.recompute_costs(cfg["cost_mode"])
     docsrc._raw.cache_clear()
-    if config.is_configured():
-        await proxy.fetch_balance(force=True)
+    await proxy.fetch_all_balances()
     if error:
         return RedirectResponse(f"/settings?saved=1&error={quote(error)}", status_code=303)
     return RedirectResponse("/settings?saved=1", status_code=303)
@@ -262,6 +263,7 @@ async def settings_save(request: Request) -> Response:
 def _sources_from_form(form: Any, current: dict[str, Any]) -> dict[str, Any]:
     """Список источников из строк формы. Пустой ключ у существующего источника — «не менять»."""
     ids, names = form.getlist("src_id"), form.getlist("src_name")
+    prefixes = form.getlist("src_prefix")
     urls, keys = form.getlist("src_url"), form.getlist("src_key")
     deleted = set(form.getlist("src_delete"))
     active_row = str(form.get("active_source") or "")
@@ -278,7 +280,8 @@ def _sources_from_form(form: Any, current: dict[str, Any]) -> dict[str, Any]:
             key = known[source_id]["api_key"]
         name = str(names[index] if index < len(names) else "").strip()
         # новому источнику id назначит config; существующий сохраняет свой — на нём история
-        sources.append({"id": source_id, "name": name, "base_url": url, "api_key": key,
+        prefix = str(prefixes[index] if index < len(prefixes) else "").strip()
+        sources.append({"id": source_id, "name": name, "prefix": prefix, "base_url": url, "api_key": key,
                         "active": active_row == str(index)})
     return {"sources": sources, "active_source": ""}
 
@@ -378,24 +381,35 @@ async def api_models() -> JSONResponse:
     return JSONResponse(stats.jsonable(stats.models_summary()))
 
 
+def _balance_source(upstream: str) -> str | None:
+    """id источника для страницы баланса: запрошенный, иначе источник по умолчанию."""
+    cfg = config.load()
+    if upstream and config.find_source(cfg, upstream):
+        return upstream
+    return cfg["source"] or None
+
+
 @app.get("/_api/balance/calendar")
-async def api_balance_calendar(month: str = "") -> JSONResponse:
-    source = config.load()["source"] or None
+async def api_balance_calendar(month: str = "", upstream: str = "") -> JSONResponse:
+    source = _balance_source(upstream)
     data = stats.balance_calendar(month or None, source)
-    data["balance"] = proxy.cached_balance()
+    data["balance"] = proxy.cached_balance(source)
+    if data["balance"] is None and source:
+        data["balance"] = await proxy.fetch_balance(source_id=source)
     latest = db.latest_balance(source)
     data["balance_checked_at"] = latest["ts"] if latest else None
+    data["upstream"] = source
     return JSONResponse(stats.jsonable(data))
 
 
 @app.get("/_api/balance/day/{day}")
-async def api_balance_day(day: str) -> JSONResponse:
-    return JSONResponse(stats.jsonable(stats.day_breakdown(day, config.load()["source"] or None)))
+async def api_balance_day(day: str, upstream: str = "") -> JSONResponse:
+    return JSONResponse(stats.jsonable(stats.day_breakdown(day, _balance_source(upstream))))
 
 
 @app.post("/_api/balance/refresh")
-async def api_balance_refresh() -> JSONResponse:
-    amount = await proxy.fetch_balance(force=True)
+async def api_balance_refresh(upstream: str = "") -> JSONResponse:
+    amount = await proxy.fetch_balance(force=True, source_id=_balance_source(upstream))
     return JSONResponse({"balance": amount, "checked_at": str(date.today())})
 
 
@@ -463,3 +477,14 @@ async def proxy_v1(request: Request, subpath: str) -> Response:
 async def proxy_api_v1(request: Request, subpath: str) -> Response:
     """Совместимость с base_url вида http://localhost:8787/api."""
     return await proxy.handle(request, f"v1/{subpath}")
+
+
+@app.api_route(
+    "/{prefix}/v1/{subpath:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+async def proxy_prefixed(request: Request, prefix: str, subpath: str) -> Response:
+    """Источник по префиксу: http://host:8787/<prefix>/v1/… Маршрут объявлен последним,
+    чтобы служебные пути (/api/v1, /static, /_api…) совпадали раньше."""
+    return await proxy.handle(request, f"v1/{subpath}", prefix=prefix)

@@ -123,7 +123,8 @@ first_used, last_used`.
 * `balance_delta` — `balance_start - balance_end`, то есть положительное значение
   означает траты. `null`, если за день меньше двух снимков баланса.
 
-Баланс и траты на `/balance` относятся к активному источнику.
+Эндпоинты баланса (`calendar`, `day`, `refresh`) принимают `upstream` — id источника;
+без него — источник по умолчанию. `calendar` возвращает выбранный в поле `upstream`.
 
 ## `POST /_api/balance/refresh`
 
@@ -173,7 +174,7 @@ first_used, last_used`.
 | ---------- | ------------------------------------------------------------ |
 | `/monitor` | `model`, `endpoint`, `upstream`, `status`, `kind`, `q`, `day`, `request` — подставляются в фильтры и синхронизируются обратно в адресную строку |
 | `/images`  | `direction`, `kind`, `model`, `q`, `page`                     |
-| `/balance` | `month` (`YYYY-MM`), `day` (`YYYY-MM-DD`) — выбранный день в календаре |
+| `/balance` | `month` (`YYYY-MM`), `day` (`YYYY-MM-DD`) — выбранный день в календаре; `upstream` — источник |
 | `/docs`    | Редирект на первую страницу; `/docs/{slug}` — конкретная      |
 | `/settings`| `saved=1` — показать подтверждение сохранения; `error` — текст ошибки (например, про логотип) |
 

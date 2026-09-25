@@ -36,9 +36,10 @@ COST_MODES = {
 }
 
 DEFAULTS: dict[str, Any] = {
-    # Апстримы ИИ-API: [{"id", "name", "base_url", "api_key"}]
+    # Апстримы ИИ-API: [{"id", "name", "prefix", "base_url", "api_key"}];
+    # источник доступен по /<prefix>/v1/…
     "sources": [],
-    # id источника, в который идут запросы
+    # id источника по умолчанию — в него идут запросы на /v1/… без префикса
     "active_source": "",
     # Адрес и порт, на которых слушает прокси; применяются при перезапуске
     "host": "127.0.0.1",
@@ -58,6 +59,12 @@ DEFAULTS: dict[str, Any] = {
     "brand_mark": "AI",
     # Имя загруженного логотипа в data/brand/ (logo.png и т.п.); пусто — плашка с буквами
     "logo_file": "",
+}
+
+# первые сегменты путей, занятые самим прокси: префикс источника не может совпасть с ними
+RESERVED_PREFIXES = {
+    "v1", "api", "monitor", "balance", "models", "images", "settings", "docs",
+    "static", "_api", "_media", "_brand", "favicon.ico",
 }
 
 # производные поля — в файл не пишутся
@@ -82,6 +89,7 @@ def _coerce_sources(raw: Any) -> tuple[list[dict[str, str]], str]:
     id нового источника до приведения ещё неизвестен)."""
     sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    prefixes: set[str] = set(RESERVED_PREFIXES)
     flagged = ""
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
@@ -97,9 +105,16 @@ def _coerce_sources(raw: Any) -> tuple[list[dict[str, str]], str]:
         while source_id in seen:
             source_id, n = f"{base_id}-{n}", n + 1
         seen.add(source_id)
+        # префикс — часть URL клиента; занятые и повторные разводим суффиксом
+        prefix = slugify(str(item.get("prefix") or "")) if str(item.get("prefix") or "").strip() else source_id
+        base_prefix, n = prefix, 2
+        while prefix in prefixes:
+            prefix, n = f"{base_prefix}-{n}", n + 1
+        prefixes.add(prefix)
         sources.append({
             "id": source_id,
             "name": name,
+            "prefix": prefix,
             "base_url": base_url,
             "api_key": str(item.get("api_key") or "").strip(),
         })
@@ -162,6 +177,15 @@ def _coerce(raw: dict[str, Any]) -> dict[str, Any]:
 
 def find_source(cfg: dict[str, Any], source_id: str) -> dict[str, str] | None:
     return next((s for s in cfg["sources"] if s["id"] == source_id), None)
+
+
+def with_source(cfg: dict[str, Any], source: dict[str, str]) -> dict[str, Any]:
+    """Конфигурация, где api_key / base_url / source взяты из указанного источника."""
+    return {**cfg, "api_key": source["api_key"], "base_url": source["base_url"], "source": source["id"]}
+
+
+def find_by_prefix(cfg: dict[str, Any], prefix: str) -> dict[str, str] | None:
+    return next((s for s in cfg["sources"] if s["prefix"] == prefix), None)
 
 
 def load() -> dict[str, Any]:
@@ -234,7 +258,8 @@ def stored_keys() -> set[str]:
 
 def is_configured() -> bool:
     cfg = load()
-    return bool(cfg["api_key"] and cfg["base_url"])
+    # ключ необязателен: без него прокси передаёт авторизацию клиента как есть
+    return bool(cfg["base_url"])
 
 
 def masked_key(api_key: str) -> str:

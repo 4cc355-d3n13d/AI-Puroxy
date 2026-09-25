@@ -228,6 +228,34 @@ check(cfg["port"] == 8787 and cfg["host"] == "127.0.0.1" and cfg["cost_mode"] ==
       "неверные порт, адрес и режим стоимости → значения по умолчанию")
 check(config.save({"port": "9000"})["port"] == 9000, "порт сохраняется числом")
 
+print("config — префиксы источников")
+parsed = config._coerce({"sources": [
+    {"base_url": "https://a.example/api"},
+    {"base_url": "https://b.example", "prefix": "Open Router"},
+    {"base_url": "https://c.example", "prefix": "monitor"},
+    {"base_url": "https://d.example", "prefix": "open-router"},
+]})
+check([s["prefix"] for s in parsed["sources"]] == ["a-example", "open-router", "monitor-2", "open-router-2"],
+      "префикс: по умолчанию — id, приводится к slug, служебные и повторы получают суффикс")
+check(config.find_by_prefix(parsed, "open-router")["base_url"] == "https://b.example"
+      and config.find_by_prefix(parsed, "нет") is None, "поиск источника по префиксу")
+routed = config.with_source(parsed, parsed["sources"][1])
+check(routed["base_url"] == "https://b.example" and routed["source"] == "b-example",
+      "конфигурация запроса берёт ключ и URL выбранного источника")
+
+print("proxy — баланс по источникам")
+proxy.observe_balance(50.0, upstream="src-low")
+proxy.observe_balance(900.0, upstream="src-rich")
+check(proxy.cached_balance("src-low") == 50.0 and proxy.cached_balance("src-rich") == 900.0,
+      "у каждого источника свой кэш баланса")
+low_cfg = {"balance_threshold": 100.0, "source": "src-low"}
+check(proxy.balance_warning(low_cfg) is not None
+      and proxy.balance_warning({**low_cfg, "source": "src-rich"}) is None,
+      "предупреждение — по балансу того источника, куда ушёл запрос")
+proxy._apply_local_cost(10.0, "src-rich")
+check(proxy.cached_balance("src-rich") == 890.0 and proxy.cached_balance("src-low") == 50.0,
+      "стоимость запроса списывается только с его источника")
+
 print("usage.fill_cost — режимы расчёта")
 db.upsert_model_pricing([{"id": "m/priced", "cost_context": 1, "cost_completion": 2}], "src-a")
 base = {"model": "m/priced", "upstream": "src-a", "prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}

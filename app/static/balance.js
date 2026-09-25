@@ -1,6 +1,10 @@
 /* Страница /balance: календарь трат по дням + детализация по моделям за выбранный день. */
 
-const bstate = { month: null, day: todayISO(), data: null };
+const bstate = { month: null, day: todayISO(), data: null, upstream: '' };
+
+/* ?upstream=… к запросам страницы — выбранный источник; пусто — по умолчанию. */
+const withSource = (url) => (bstate.upstream
+  ? `${url}${url.includes('?') ? '&' : '?'}upstream=${encodeURIComponent(bstate.upstream)}` : url);
 const bel = (id) => document.getElementById(id);
 
 const monthTitle = (month) => {
@@ -9,7 +13,7 @@ const monthTitle = (month) => {
 };
 
 async function loadCalendar(month) {
-  const data = await api(`/_api/balance/calendar${month ? `?month=${month}` : ''}`);
+  const data = await api(withSource(`/_api/balance/calendar${month ? `?month=${month}` : ''}`));
   bstate.month = data.month;
   bstate.data = data;
 
@@ -37,9 +41,10 @@ async function loadCalendar(month) {
 
   const overview = await api('/_api/overview');
   const spentThisMonth = data.total_cost;
+  const low = !!(overview.balance_threshold && data.balance !== null && data.balance < overview.balance_threshold);
   bel('balance-stats').innerHTML = `
-    <div class="stat"><div class="stat-label">Текущий баланс</div>
-      <div class="stat-value" style="${overview.low_balance ? 'color:var(--err)' : ''}">${overview.balance === null ? '—' : fmtMoney(overview.balance)}</div>
+    <div class="stat"><div class="stat-label">Текущий баланс${Object.keys(window.SOURCE_NAMES || {}).length > 1 ? ' · ' + esc(sourceName(data.upstream)) : ''}</div>
+      <div class="stat-value" style="${low ? 'color:var(--err)' : ''}">${data.balance === null ? '—' : fmtMoney(data.balance)}</div>
       <div class="stat-sub">${data.balance_checked_at ? 'проверен ' + data.balance_checked_at : 'нет данных'}</div></div>
     <div class="stat"><div class="stat-label">Потрачено за месяц</div>
       <div class="stat-value">${fmtMoney(spentThisMonth)}</div>
@@ -49,7 +54,7 @@ async function loadCalendar(month) {
       <div class="stat-sub">по дням с активностью</div></div>
     <div class="stat"><div class="stat-label">Порог предупреждения</div>
       <div class="stat-value">${overview.balance_threshold ? fmtMoney(overview.balance_threshold) : 'выкл.'}</div>
-      <div class="stat-sub">${overview.low_balance ? 'баланс ниже порога' : 'настраивается в /settings'}</div></div>`;
+      <div class="stat-sub">${low ? 'баланс ниже порога' : 'настраивается в /settings'}</div></div>`;
 }
 
 async function selectDay(day) {
@@ -58,8 +63,8 @@ async function selectDay(day) {
     cell.classList.toggle('is-selected', cell.dataset.day === day);
   });
   bel('day-title').textContent = `Детализация за ${new Date(day + 'T00:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}`;
-  bel('day-log-link').href = `/monitor?day=${day}`;
-  const data = await api(`/_api/balance/day/${day}`);
+  bel('day-log-link').href = `/monitor?day=${day}${bstate.upstream ? `&upstream=${encodeURIComponent(bstate.upstream)}` : ''}`;
+  const data = await api(withSource(`/_api/balance/day/${day}`));
   if (!data.models.length) {
     bel('day-detail').innerHTML = '<div class="empty">За этот день запросов не было</div>';
     return;
@@ -102,6 +107,19 @@ async function selectDay(day) {
 document.addEventListener('DOMContentLoaded', async () => {
   const params = new URLSearchParams(location.search);
   if (params.get('day')) bstate.day = params.get('day');
+  bstate.upstream = params.get('upstream') || '';
+  const picker = bel('b-source');
+  if (picker) {
+    picker.value = bstate.upstream || picker.dataset.default;
+    picker.addEventListener('change', async () => {
+      bstate.upstream = picker.value === picker.dataset.default ? '' : picker.value;
+      const query = new URLSearchParams(location.search);
+      if (bstate.upstream) query.set('upstream', bstate.upstream); else query.delete('upstream');
+      history.replaceState(null, '', query.toString() ? `/balance?${query}` : '/balance');
+      await loadCalendar(bstate.month);
+      await selectDay(bstate.day);
+    });
+  }
   await loadCalendar(params.get('month') || bstate.day.slice(0, 7));
   await selectDay(bstate.day);
 
@@ -111,7 +129,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   bel('refresh-balance').addEventListener('click', async (event) => {
     event.target.disabled = true;
     event.target.textContent = 'Обновляем…';
-    await fetch('/_api/balance/refresh', { method: 'POST' });
+    await fetch(withSource('/_api/balance/refresh'), { method: 'POST' });
     await refreshBalanceChip();
     await loadCalendar(bstate.month);
     await selectDay(bstate.day);

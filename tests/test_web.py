@@ -19,7 +19,7 @@ os.environ["AI_PROXY_DATA_DIR"] = tempfile.mkdtemp(prefix="ai-proxy-web-test-")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import config, docsrc  # noqa: E402
+from app import config, db, docsrc  # noqa: E402
 from app.main import app  # noqa: E402
 
 checks = 0
@@ -80,7 +80,7 @@ with TestClient(app) as client:
     print("прокси без настроек")
     response = client.get("/v1/models")
     check(response.status_code == 503 and response.json()["error"]["type"] == "proxy_not_configured",
-          "/v1/* без ключа → понятная 503, а не падение")
+          "/v1/* без настроек → понятная 503, а не падение")
 
     print("сохранение настроек")
     response = client.post(
@@ -127,6 +127,63 @@ with TestClient(app) as client:
     check("нужен перезапуск" in page and "Перезапустить сейчас" not in page,
           "/settings предупреждает о перезапуске; без сервиса кнопки нет")
     check(client.post("/_api/restart").status_code == 409, "перезапуск без сервиса → 409, процесс жив")
+
+    print("префиксы источников")
+    client.post("/settings", data={
+        "src_id": [s["id"] for s in config.load()["sources"]],
+        "src_name": ["Основной", "Запасной"], "src_prefix": ["", "backup"],
+        "src_url": ["https://example.invalid/api", "https://backup.invalid/api"],
+        "src_key": ["", ""], "active_source": "0",
+    })
+    cfg = config.load()
+    check([s["prefix"] for s in cfg["sources"]] == [cfg["sources"][0]["id"], "backup"],
+          "префикс из формы сохранён, пустой — по id")
+    before = db.query("SELECT count(*) AS n FROM requests")[0]["n"]
+    response = client.get("/backup/v1/models")
+    last = db.query("SELECT upstream, path FROM requests ORDER BY id DESC LIMIT 1")[0]
+    check(response.status_code == 502 and last["upstream"] == cfg["sources"][1]["id"]
+          and last["path"] == "/v1/models",
+          "/<префикс>/v1/… уходит в свой источник и логируется с ним")
+    client.get("/v1/models")
+    last = db.query("SELECT upstream FROM requests ORDER BY id DESC LIMIT 1")[0]
+    check(last["upstream"] == cfg["source"], "/v1/… без префикса — в источник по умолчанию")
+    client.get("/api/v1/models")
+    last = db.query("SELECT upstream FROM requests ORDER BY id DESC LIMIT 1")[0]
+    check(last["upstream"] == cfg["source"], "/api/v1/… не принимается за префикс «api»")
+    response = client.get("/nope/v1/models")
+    check(response.status_code == 404 and response.json()["error"]["type"] == "unknown_source"
+          and db.query("SELECT count(*) AS n FROM requests")[0]["n"] == before + 3,
+          "неизвестный префикс → понятная 404, в лог не пишется")
+    check("/backup/v1" in client.get("/settings").text, "в настройках показан base URL источника")
+    response = client.get(f"/_api/balance/calendar?upstream={cfg['sources'][1]['id']}")
+    check(response.status_code == 200 and response.json()["upstream"] == cfg["sources"][1]["id"],
+          "календарь баланса — по выбранному источнику")
+    check('id="b-source"' in client.get("/balance").text, "на /balance есть выбор источника")
+
+    print("источник без ключа")
+    import httpx
+    from app import proxy
+    seen: dict = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"data": []})
+
+    real_client = proxy._client
+    proxy._client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    try:
+        keyed = config.load()["sources"][0]
+        config.save({"sources": [
+            {**keyed, "api_key": "sk-keyed"},
+            {"name": "Без ключа", "prefix": "nokey", "base_url": "https://nokey.invalid/api", "api_key": ""},
+        ], "active_source": keyed["id"]})
+        response = client.get("/nokey/v1/models", headers={"Authorization": "Bearer client-key"})
+        check(response.status_code == 200 and seen["auth"] is None,
+              "без ключа запрос проходит, а не падает с 503; авторизация в апстрим не уходит")
+        client.get("/v1/models", headers={"Authorization": "Bearer client-key"})
+        check(seen["auth"] == "Bearer sk-keyed", "с ключом подставляется ключ источника")
+    finally:
+        proxy._client = real_client
 
     print("фактический адрес старого запуска")
     from app import main as main_mod

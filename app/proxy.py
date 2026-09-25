@@ -26,10 +26,9 @@ _DROP_RESPONSE_HEADERS = {
 _client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
 
-# кэш баланса, чтобы не дёргать апстрим на каждый запрос; относится к одному источнику
-_balance_amount: float | None = None
-_balance_checked_at: float = 0.0
-_balance_source: str = ""
+# кэш баланса по источникам, чтобы не дёргать апстрим на каждый запрос:
+# id источника → (сумма, время проверки по monotonic)
+_balances: dict[str, tuple[float, float]] = {}
 _balance_lock = asyncio.Lock()
 
 
@@ -64,19 +63,24 @@ def upstream_url(cfg: dict[str, Any], subpath: str) -> str:
 # --------------------------------------------------------------------------- баланс
 
 
-async def fetch_balance(force: bool = False) -> float | None:
-    """Баланс апстрима с кэшем; при force — обязательный запрос к API."""
-    global _balance_amount, _balance_checked_at, _balance_source
+def _source_cfg(source_id: str | None = None) -> dict[str, Any] | None:
+    """Конфигурация для источника (по умолчанию — источника по умолчанию)."""
     cfg = config.load()
-    if not cfg["api_key"]:
+    source = config.find_source(cfg, source_id or cfg["source"])
+    return config.with_source(cfg, source) if source else None
+
+
+async def fetch_balance(force: bool = False, source_id: str | None = None) -> float | None:
+    """Баланс источника с кэшем; при force — обязательный запрос к API."""
+    cfg = _source_cfg(source_id)
+    if cfg is None or not cfg["api_key"]:
         return None
+    source = cfg["source"]
     async with _balance_lock:
-        if _balance_source != cfg["source"]:
-            # источник переключили — баланс прежнего к новому отношения не имеет
-            _balance_amount, _balance_checked_at, _balance_source = None, 0.0, cfg["source"]
-        fresh = (time.monotonic() - _balance_checked_at) < cfg["balance_poll_seconds"]
-        if not force and fresh and _balance_amount is not None:
-            return _balance_amount
+        cached = _balances.get(source)
+        fresh = cached is not None and (time.monotonic() - cached[1]) < cfg["balance_poll_seconds"]
+        if not force and fresh:
+            return cached[0]
         try:
             client = await get_client()
             response = await client.get(
@@ -88,31 +92,35 @@ async def fetch_balance(force: bool = False) -> float | None:
         except (httpx.HTTPError, ValueError):
             amount = None
         if amount is not None:
-            _balance_amount = amount
-            _balance_checked_at = time.monotonic()
-            db.record_balance(amount, source="poll", upstream=cfg["source"])
-        return _balance_amount
+            _balances[source] = (amount, time.monotonic())
+            db.record_balance(amount, source="poll", upstream=source)
+        return cached_balance(source)
+
+
+async def fetch_all_balances() -> None:
+    """Опрос баланса всех источников с ключом — для фонового цикла."""
+    for source in config.load()["sources"]:
+        if source["api_key"]:
+            await fetch_balance(force=True, source_id=source["id"])
 
 
 def observe_balance(amount: float, source: str = "proxy", upstream: str = "") -> None:
     """Зафиксировать баланс, увиденный при проксировании GET /v1/balance."""
-    global _balance_amount, _balance_checked_at, _balance_source
-    _balance_amount = amount
-    _balance_checked_at = time.monotonic()
-    _balance_source = upstream
+    _balances[upstream] = (amount, time.monotonic())
     db.record_balance(amount, source=source, upstream=upstream)
 
 
-def cached_balance() -> float | None:
-    """Баланс активного источника, если он известен."""
-    return _balance_amount if _balance_source == config.load()["source"] else None
+def cached_balance(source_id: str | None = None) -> float | None:
+    """Баланс источника (по умолчанию — источника по умолчанию), если он известен."""
+    cached = _balances.get(source_id or config.load()["source"])
+    return cached[0] if cached else None
 
 
-def _apply_local_cost(cost: float | None) -> None:
-    """Уменьшить кэш баланса на стоимость запроса, чтобы предупреждение было актуальным."""
-    global _balance_amount
-    if cost and cached_balance() is not None:
-        _balance_amount = max(0.0, _balance_amount - cost)
+def _apply_local_cost(cost: float | None, source_id: str) -> None:
+    """Уменьшить кэш баланса источника на стоимость запроса, чтобы предупреждение было актуальным."""
+    cached = _balances.get(source_id)
+    if cost and cached:
+        _balances[source_id] = (max(0.0, cached[0] - cost), cached[1])
 
 
 def balance_warning(cfg: dict[str, Any]) -> str | None:
@@ -120,7 +128,7 @@ def balance_warning(cfg: dict[str, Any]) -> str | None:
     threshold = cfg["balance_threshold"]
     if not threshold or threshold <= 0:
         return None
-    amount = cached_balance()
+    amount = cached_balance(cfg["source"])
     if amount is None or amount >= threshold:
         return None
     return (
@@ -330,18 +338,32 @@ class _StreamAccumulator:
 # --------------------------------------------------------------------------- основной обработчик
 
 
-async def handle(request: Request, subpath: str) -> Response:
+async def handle(request: Request, subpath: str, prefix: str | None = None) -> Response:
+    """Проксировать запрос в источник по префиксу пути, без префикса — в источник по умолчанию."""
     cfg = config.load()
-    if not config.is_configured():
+    source = config.find_by_prefix(cfg, prefix) if prefix else config.find_source(cfg, cfg["source"])
+    if prefix and source is None:
+        known = ", ".join(f"/{s['prefix']}/v1" for s in cfg["sources"]) or "—"
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": f"Источник с префиксом «{prefix}» не найден. Доступны: /v1 (по умолчанию), {known}",
+                    "type": "unknown_source",
+                }
+            },
+        )
+    if source is None or not source["base_url"]:
         return JSONResponse(
             status_code=503,
             content={
                 "error": {
-                    "message": "Прокси не настроен: укажите api_key и base_url на странице /settings",
+                    "message": "Прокси не настроен: добавьте источник с base URL на странице /settings",
                     "type": "proxy_not_configured",
                 }
             },
         )
+    cfg = config.with_source(cfg, source)
 
     subpath = subpath.lstrip("/")
     body = await request.body()
@@ -351,7 +373,9 @@ async def handle(request: Request, subpath: str) -> Response:
     is_stream = bool(isinstance(request_payload, dict) and request_payload.get("stream"))
 
     headers = {k: v for k, v in request.headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
-    headers["Authorization"] = f"Bearer {cfg['api_key']}"
+    # ключ необязателен: без него запрос уходит без авторизации
+    if cfg["api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['api_key']}"
     if body and "content-type" not in {k.lower() for k in headers}:
         headers["Content-Type"] = "application/json"
 
@@ -478,7 +502,7 @@ def _post_process(endpoint: str, payload: Any, entry: dict[str, Any]) -> None:
         amount = usage_mod.parse_balance(payload)
         if amount is not None:
             observe_balance(amount, source="proxy", upstream=entry.get("upstream") or "")
-    _apply_local_cost(entry.get("cost"))
+    _apply_local_cost(entry.get("cost"), entry.get("upstream") or "")
 
 
 async def _stream_response(
@@ -562,5 +586,5 @@ async def _stream_response(
             },
             ensure_ascii=False,
         )
-        _apply_local_cost(entry.get("cost"))
+        _apply_local_cost(entry.get("cost"), entry.get("upstream") or "")
         db.log_request(entry)

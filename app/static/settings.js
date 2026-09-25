@@ -16,6 +16,16 @@ function renumberSources() {
   });
 }
 
+/* Готовый base URL для клиента обновляется по мере ввода префикса. */
+sources.addEventListener('input', (event) => {
+  if (event.target.name !== 'src_prefix') return;
+  const row = event.target.closest('.source-row');
+  const code = row.querySelector('.source-endpoint');
+  const prefix = event.target.value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    || event.target.placeholder;
+  if (code && !row.classList.contains('is-new')) code.textContent = `${sources.dataset.base}/${prefix}/v1`;
+});
+
 document.getElementById('add-source').addEventListener('click', () => {
   const row = document.getElementById('source-template').content.firstElementChild.cloneNode(true);
   sources.appendChild(row);

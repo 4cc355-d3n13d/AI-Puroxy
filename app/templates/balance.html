@@ -2,6 +2,16 @@
 {% block title %}Баланс{% endblock %}
 
 {% block content %}
+{% if sources|length > 1 %}
+<div class="filters">
+  <label class="small subtle" for="b-source">Источник</label>
+  <select id="b-source" data-default="{{ cfg_source }}">
+    {% for source in sources %}
+    <option value="{{ source.id }}">{{ source.name }}{% if source.id == cfg_source %} (по умолчанию){% endif %}</option>
+    {% endfor %}
+  </select>
+</div>
+{% endif %}
 <div class="stats" id="balance-stats"></div>
 
 <div class="balance-grid">
