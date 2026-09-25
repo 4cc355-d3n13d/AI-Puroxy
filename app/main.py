@@ -6,6 +6,7 @@ import contextlib
 import os
 import signal
 import sys
+import threading
 from datetime import date
 from urllib.parse import quote
 from pathlib import Path
@@ -25,6 +26,7 @@ app = FastAPI(title="AI Monitoring Proxy", docs_url=None, redoc_url=None, openap
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 _background: list[asyncio.Task[Any]] = []
+_stopping = threading.Event()  # сигнал фоновым потокам остановиться до закрытия базы
 
 
 # --------------------------------------------------------------------------- жизненный цикл
@@ -42,14 +44,15 @@ async def _startup() -> None:
     cfg = config.load()
     db.migrate(cfg["source"])  # источники и раздельные суммы у записей прежних версий
     db.backfill_details()  # разбор тел у записей, сделанных до появления этих полей
-    db.backfill_media()  # картинки из записей, сделанных до появления галереи
     db.recompute_costs(cfg["cost_mode"])
     db.apply_retention(cfg["retention_days"])
     _background.append(asyncio.create_task(_maintenance_loop()))
+    _background.append(asyncio.create_task(_backfill_media_loop()))
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    _stopping.set()
     for task in _background:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -57,6 +60,22 @@ async def _shutdown() -> None:
     _background.clear()
     await proxy.shutdown()
     db.close()
+
+
+async def _backfill_media_loop() -> None:
+    """Картинки из записей, сделанных до появления галереи, — в фоне, небольшими порциями.
+
+    На базе в 2 ГБ полный проход занимает минуты; при старте он держал бы прокси
+    недоступным, а в потоке с порциями по 200 записей запросы идут своим чередом.
+    """
+    while True:
+        try:
+            done = await asyncio.to_thread(db.backfill_media, 200, _stopping)
+        except Exception:  # фоновая задача не должна падать; попробуем при следующем старте
+            return
+        if not done or _stopping.is_set():
+            return
+        await asyncio.sleep(0.2)
 
 
 async def _maintenance_loop() -> None:

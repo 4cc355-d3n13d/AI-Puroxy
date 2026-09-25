@@ -319,7 +319,7 @@ def backfill_details(limit: int = 5000) -> int:
     return len(rows)
 
 
-def backfill_media(limit: int = 5000) -> int:
+def backfill_media(limit: int = 5000, stop: threading.Event | None = None) -> int:
     """Найти медиа в записях, сделанных до появления галереи.
 
     Тела старых записей не переписываются: картинка из обрезанного тела всё равно
@@ -331,10 +331,16 @@ def backfill_media(limit: int = 5000) -> int:
         [limit],
     )
     for row in rows:
+        if stop is not None and stop.is_set():
+            break
         _, inputs = media.extract_request(inspect.parse(row["request_body"]))
         _, outputs = media.extract_response(inspect.parse(row["response_body"]))
         details = inspect.compact(row["request_body"], row["response_body"])
         with _lock:
+            # проверка под блокировкой: close() берёт её же, поэтому после остановки
+            # поток не откроет закрытую базу заново
+            if stop is not None and stop.is_set():
+                break
             conn = connect()
             _record_media(conn, inputs.items, row["id"], row["ts"], row["model"], row["upstream"],
                           details["prompt_preview"], inputs.prompt)
