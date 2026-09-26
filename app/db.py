@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS media (
     last_day        DATE,
     uses            INTEGER DEFAULT 1
 );
+-- подпись раньше обрезалась до 400 символов; TRUE — сохранён полный промпт
+ALTER TABLE media ADD COLUMN IF NOT EXISTS prompt_full BOOLEAN DEFAULT FALSE;
 """
 
 
@@ -252,7 +254,7 @@ def log_request(entry: dict[str, Any]) -> int:
         )
         request_id = conn.execute("SELECT currval('seq_request_id')").fetchone()[0]
         _record_media(conn, items, request_id, ts, entry.get("model"), entry.get("upstream"),
-                      details["prompt_preview"])
+                      details["prompt_full"])
         return request_id
 
 
@@ -272,8 +274,8 @@ def _record_media(
         conn.execute(
             """
             INSERT INTO media (key, direction, kind, file, url, mime, bytes, model, upstream, prompt,
-                               request_id, ts, day, last_request_id, last_ts, last_day, uses)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                               request_id, ts, day, last_request_id, last_ts, last_day, uses, prompt_full)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,TRUE)
             ON CONFLICT (key) DO UPDATE SET
                 last_request_id = excluded.last_request_id,
                 last_ts = excluded.last_ts,
@@ -283,7 +285,7 @@ def _record_media(
             [
                 item["key"], item["direction"], item["kind"], item["file"], item["url"],
                 item["mime"], item["bytes"], model, upstream,
-                (caption or "")[:400] or None,
+                (caption or "")[:MEDIA_PROMPT_LIMIT] or None,
                 request_id, ts, ts.date(), request_id, ts, ts.date(),
             ],
         )
@@ -343,12 +345,46 @@ def backfill_media(limit: int = 5000, stop: threading.Event | None = None) -> in
                 break
             conn = connect()
             _record_media(conn, inputs.items, row["id"], row["ts"], row["model"], row["upstream"],
-                          details["prompt_preview"], inputs.prompt)
+                          details["prompt_full"], inputs.prompt)
             _record_media(conn, outputs.items, row["id"], row["ts"], row["model"], row["upstream"],
-                          details["prompt_preview"], outputs.prompt)
+                          details["prompt_full"], outputs.prompt)
             conn.execute(
                 "UPDATE requests SET images = ?, media_out = ?, media_scanned = TRUE WHERE id = ?",
                 [details["images"], details["media_out"], row["id"]],
+            )
+    return len(rows)
+
+
+MEDIA_PROMPT_LIMIT = 8000
+
+
+def refresh_media_prompts(limit: int = 200, stop: threading.Event | None = None) -> int:
+    """Пересобрать подписи галереи, которые раньше обрезались до 400 символов.
+
+    Промпт берётся тем же путём, что при записи: из промпта медиа-задачи или
+    из последнего сообщения пользователя в запросе, где картинка встретилась впервые.
+    """
+    rows = query(
+        "SELECT m.key, m.direction, r.request_body, r.response_body FROM media m "
+        "LEFT JOIN requests r ON r.id = m.request_id "
+        "WHERE m.prompt_full IS NOT TRUE LIMIT ?",
+        [limit],
+    )
+    for row in rows:
+        if stop is not None and stop.is_set():
+            break
+        # store=False: картинки уже сохранены, нужен только текст
+        _, inputs = media.extract_request(inspect.parse(row["request_body"]), store=False)
+        _, outputs = media.extract_response(inspect.parse(row["response_body"]), store=False)
+        own = outputs.prompt if row["direction"] == "output" else inputs.prompt
+        prompt = own or inputs.prompt or inspect.compact(row["request_body"], row["response_body"])["prompt_full"]
+        with _lock:
+            if stop is not None and stop.is_set():
+                break
+            # запрос мог уйти по ретеншену — тогда оставляем прежнюю подпись
+            connect().execute(
+                "UPDATE media SET prompt = coalesce(?, prompt), prompt_full = TRUE WHERE key = ?",
+                [(prompt or "")[:MEDIA_PROMPT_LIMIT] or None, row["key"]],
             )
     return len(rows)
 

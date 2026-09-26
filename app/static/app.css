@@ -575,7 +575,11 @@ body.no-scroll { overflow: hidden; }
 .lb-stage img, .lb-stage video { max-width: 100%; max-height: calc(100vh - 140px); object-fit: contain; border-radius: 4px; box-shadow: 0 10px 40px rgba(0, 0, 0, .5); }
 .lb-missing { color: #aab; font-size: 14px; }
 .lb-caption { grid-column: 2; grid-row: 2; padding: 6px 0 18px; color: #d7dae0; font-size: 13px; text-align: center; }
-.lb-text { max-width: 900px; margin: 0 auto 6px; line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* промпт целиком: длинный прокручивается, а не обрезается */
+.lb-text {
+  max-width: 900px; max-height: 28vh; margin: 0 auto 6px; padding: 0 12px;
+  overflow: auto; line-height: 1.5; white-space: pre-wrap; text-align: left;
+}
 .lb-links { display: flex; gap: 16px; justify-content: center; color: #9aa1ad; font-size: 12px; }
 .lb-links a { color: #aebcff; }
 .lb-close, .lb-nav {
@@ -604,9 +608,11 @@ body.no-scroll { overflow: hidden; }
 .g-meta { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .g-model { font-size: 12px; font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .g-prompt {
-  font-size: 12px; color: var(--muted); line-height: 1.4;
+  font-size: 12px; color: var(--muted); line-height: 1.4; cursor: pointer;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+.g-prompt.is-open { display: block; white-space: pre-wrap; max-height: 260px; overflow: auto; cursor: text; }
+.log-row { scroll-margin-top: 100px; }
 .g-foot { display: flex; gap: 10px; }
 
 /* ------------------------------------------------------------------ шапка: тема и узкие экраны */

@@ -71,6 +71,7 @@ async def _backfill_media_loop() -> None:
     while True:
         try:
             done = await asyncio.to_thread(db.backfill_media, 200, _stopping)
+            done += await asyncio.to_thread(db.refresh_media_prompts, 200, _stopping)
         except Exception:  # фоновая задача не должна падать; попробуем при следующем старте
             return
         if not done or _stopping.is_set():
@@ -376,6 +377,28 @@ async def api_requests(
         "date_to": date_to or None,
     }
     return JSONResponse(stats.jsonable(stats.requests_page(filters, page, page_size)))
+
+
+@app.get("/_api/requests/{request_id}/page")
+async def api_request_page(
+    request_id: int,
+    model: str = "",
+    endpoint: str = "",
+    upstream: str = "",
+    status: str = "",
+    kind: str = "",
+    q: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    page_size: int = 50,
+) -> JSONResponse:
+    """На какой странице лога запись — чтобы ссылка /monitor?request=… открывала и старые."""
+    filters = {
+        "model": model or None, "endpoint": endpoint or None, "upstream": upstream or None,
+        "status": status or None, "kind": kind or None, "q": q or None,
+        "date_from": date_from or None, "date_to": date_to or None,
+    }
+    return JSONResponse({"page": stats.request_page(request_id, filters, page_size)})
 
 
 @app.get("/_api/requests/{request_id}")

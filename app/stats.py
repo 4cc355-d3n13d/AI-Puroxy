@@ -79,6 +79,25 @@ def requests_page(filters: dict[str, Any], page: int = 1, page_size: int = 50) -
     }
 
 
+def request_page(request_id: int, filters: dict[str, Any], page_size: int = 50) -> int | None:
+    """Номер страницы лога (сортировка — свежие сверху), на которой стоит запись.
+
+    None — записи нет или она не проходит фильтры.
+    """
+    page_size = min(MAX_PAGE_SIZE, max(1, int(page_size or 50)))
+    where, params = _where(filters)
+    found = db.query(
+        f"SELECT ts FROM requests{where}{' AND' if where else ' WHERE'} id = ?", [*params, request_id]
+    )
+    if not found:
+        return None
+    before = db.query(
+        f"SELECT count(*) AS n FROM requests{where}{' AND' if where else ' WHERE'} (ts > ? OR (ts = ? AND id > ?))",
+        [*params, found[0]["ts"], found[0]["ts"], request_id],
+    )[0]["n"]
+    return int(before) // page_size + 1
+
+
 def request_detail(request_id: int) -> dict[str, Any] | None:
     rows = db.query("SELECT * FROM requests WHERE id = ?", [request_id])
     if not rows:

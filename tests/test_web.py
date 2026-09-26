@@ -74,6 +74,8 @@ with TestClient(app) as client:
         check(response.status_code == 200 and response.headers["content-type"].startswith("application/json"),
               f"{path} отвечает JSON")
 
+    check(client.get("/_api/requests/999999/page").json() == {"page": None},
+          "/_api/requests/{id}/page на несуществующей записи → page: null")
     check(client.get("/_api/requests/999999").status_code == 404,
           "/_api/requests/{id} на несуществующей записи → 404")
 

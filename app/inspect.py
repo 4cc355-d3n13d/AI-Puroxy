@@ -321,6 +321,8 @@ def compact(request_body: Any, response_body: Any) -> dict[str, Any]:
     )
     called = [c.get("name") for c in response["tool_calls"] if c.get("name")]
     return {
+        # полный текст — подпись картинок в галерее; в таблицу requests не пишется
+        "prompt_full": last_user,
         "prompt_preview": _clip(last_user),
         "answer_preview": _clip(response["text"] or response["error"]),
         "reasoning_preview": _clip(response["reasoning"], 200),

@@ -36,7 +36,7 @@ function card(item) {
           <span class="tag ${item.direction === 'output' ? 'ok' : ''}">${DIRECTION_LABEL[item.direction] || esc(item.direction)}</span>
           <span class="g-model" title="${esc(item.model || '')}">${esc(item.model || '—')}</span>
         </div>
-        ${caption ? `<div class="g-prompt" title="${esc(caption)}">${esc(caption)}</div>` : ''}
+        ${caption ? `<div class="g-prompt" title="нажмите, чтобы развернуть">${esc(caption)}</div>` : ''}
         <div class="g-foot small subtle">
           <a href="/monitor?request=${item.request_id}" title="открыть запрос">${when}</a>
           ${item.uses > 1 ? `<span title="встречалась в ${item.uses} запросах">×${item.uses}</span>` : ''}
@@ -83,6 +83,11 @@ async function load() {
 document.addEventListener('DOMContentLoaded', () => {
   readUrl();
   load();
+  // длинный промпт в карточке разворачивается по клику
+  $('gallery').addEventListener('click', (event) => {
+    const prompt = event.target.closest('.g-prompt');
+    if (prompt && !prompt.classList.contains('is-open')) prompt.classList.add('is-open');
+  });
   document.querySelectorAll('#g-direction button').forEach((button) => {
     button.addEventListener('click', () => { gallery.direction = button.dataset.value; gallery.page = 1; load(); });
   });

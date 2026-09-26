@@ -520,10 +520,34 @@ function scheduleAutoRefresh() {
   if (el('auto-refresh').checked) state.timer = setInterval(autoRefresh, 5000);
 }
 
+/* Ссылка /monitor?request=ID: запись может быть далеко от первой страницы.
+   Сервер говорит, на какой она странице; не проходит фильтры — сбрасываем их. */
+async function locateRequest(id) {
+  const lookup = async () => {
+    const params = new URLSearchParams({ ...currentFilters(), page_size: state.pageSize });
+    return (await api(`/_api/requests/${encodeURIComponent(id)}/page?${params}`)).page;
+  };
+  let page = await lookup();
+  if (page === null) {
+    ['f-q', 'f-from', 'f-to'].forEach((key) => { el(key).value = ''; });
+    ['f-model', 'f-endpoint', 'f-upstream', 'f-status', 'f-kind'].forEach((key) => { el(key).value = ''; });
+    page = await lookup();
+  }
+  return page;
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
   readUrlFilters();
   await loadFilters();
-  await reload(true);
+  const linked = state.openId;
+  const page = linked ? await locateRequest(linked).catch(() => null) : null;
+  if (linked && page === null) state.openId = null; // записи нет (например, удалена ретеншеном)
+  state.page = page || 1;
+  await reload(false);
+  if (linked && page) {
+    const row = el('log-body').querySelector(`.log-row[data-id="${linked}"]`);
+    if (row) row.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
   scheduleAutoRefresh();
 
   ['f-model', 'f-endpoint', 'f-upstream', 'f-status', 'f-kind', 'f-from', 'f-to'].forEach((id) => {

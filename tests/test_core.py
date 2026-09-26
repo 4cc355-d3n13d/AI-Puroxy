@@ -374,6 +374,32 @@ saved = config.MEDIA_DIR / inputs.items[0]["file"]
 db.apply_retention(7)
 check(not saved.exists() and not db.query("SELECT 1 FROM media"), "ретеншен удаляет старые медиа и их файлы")
 
+print("галерея — полный промпт в подписи")
+long_prompt = "Опиши картинку подробно. " * 40
+long_chat = {"messages": [{"role": "user", "content": [
+    {"type": "text", "text": long_prompt},
+    {"type": "image_url", "image_url": {"url": "https://cdn.example/long.jpg"}}]}]}
+_, found = media.extract_request(long_chat)
+db.log_request({"method": "POST", "path": "/v1/chat/completions", "model": "v/long",
+                "request_body": json.dumps(long_chat), "media": found.items})
+caption = db.query("SELECT prompt FROM media WHERE url = 'https://cdn.example/long.jpg'")[0]["prompt"]
+check(caption == long_prompt, "подпись — полный промпт, а не превью в 400 символов")
+db.execute("UPDATE media SET prompt = ?, prompt_full = FALSE WHERE url = 'https://cdn.example/long.jpg'",
+           [long_prompt[:400]])
+check(db.refresh_media_prompts() >= 1
+      and db.query("SELECT prompt FROM media WHERE url = 'https://cdn.example/long.jpg'")[0]["prompt"] == long_prompt,
+      "старые обрезанные подписи пересобираются из тела запроса")
+check(db.refresh_media_prompts() == 0, "повторный проход ничего не делает")
+
+print("stats.request_page — страница записи для ссылки")
+ids = [db.log_request({"method": "GET", "path": "/v1/models", "endpoint": "v1/models", "model": "page/test"})
+       for _ in range(5)]
+check(stats.request_page(ids[-1], {"model": "page/test"}, 2) == 1
+      and stats.request_page(ids[0], {"model": "page/test"}, 2) == 3,
+      "свежая запись — на первой странице, старая — дальше")
+check(stats.request_page(ids[0], {"model": "другая"}, 2) is None and stats.request_page(10**9, {}, 2) is None,
+      "не проходит фильтры или не существует → None")
+
 print("db.backfill_media — картинки из старых записей")
 db.execute("INSERT INTO requests (ts, day, model, request_body, media_scanned) VALUES (now(), current_date, 'v/old', ?, FALSE)",
            [json.dumps(chat)])
