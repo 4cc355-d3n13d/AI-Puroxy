@@ -114,6 +114,8 @@ function renderBrandPreview() {
   const hasLogo = !!brandPreview.logo.getAttribute('src') && !(remove && remove.checked && !brandPreview.picked);
   brandPreview.name.textContent = name;
   brandPreview.mark.textContent = mark;
+  // та же проверка, что brand.is_emoji на сервере: ни букв, ни цифр, есть пиктограмма
+  brandPreview.mark.classList.toggle('is-emoji', !/[\p{L}\p{N}]/u.test(mark) && /\p{Extended_Pictographic}/u.test(mark));
   brandPreview.logo.hidden = !hasLogo;
   brandPreview.mark.hidden = hasLogo || !mark;
 }

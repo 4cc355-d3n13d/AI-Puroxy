@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 
 from . import config
@@ -12,6 +13,13 @@ MIME = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp", "gif": "i
 
 class LogoError(ValueError):
     """Файл не подходит на роль логотипа; текст показывается на странице настроек."""
+
+
+def is_emoji(text: str) -> bool:
+    """Плашка из эмодзи, а не из букв: у неё свой стиль (.brand-mark.is-emoji)."""
+    if not text or any(unicodedata.category(ch)[0] in "LN" for ch in text):
+        return False
+    return any(unicodedata.category(ch) == "So" or ord(ch) >= 0x1F000 for ch in text)
 
 
 def sniff(data: bytes) -> str | None:

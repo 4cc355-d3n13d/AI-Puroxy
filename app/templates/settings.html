@@ -150,7 +150,7 @@
         <div class="brand-edit">
           <div class="brand-preview" id="brand-preview" title="Так выглядит в шапке">
             <img class="brand-logo" id="preview-logo" src="{{ logo_url or '' }}" alt="" {% if not logo_url %}hidden{% endif %}>
-            <span class="brand-mark" id="preview-mark" {% if logo_url or not cfg.brand_mark %}hidden{% endif %}>{{ cfg.brand_mark }}</span>
+            <span class="brand-mark{% if brand_mark_emoji %} is-emoji{% endif %}" id="preview-mark" {% if logo_url or not cfg.brand_mark %}hidden{% endif %}>{{ cfg.brand_mark }}</span>
             <span class="brand-text" id="preview-name">{{ cfg.brand_name }}</span>
           </div>
           <div class="field-pair">

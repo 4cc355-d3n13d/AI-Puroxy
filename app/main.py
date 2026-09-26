@@ -120,6 +120,7 @@ def _page_context(request: Request, active: str) -> dict[str, Any]:
         "cfg_source": cfg["source"],
         "brand_name": cfg["brand_name"],
         "brand_mark": cfg["brand_mark"],
+        "brand_mark_emoji": brand.is_emoji(cfg["brand_mark"]),
         "logo_url": brand.logo_url(cfg),
         "v": _static_version(),
     }

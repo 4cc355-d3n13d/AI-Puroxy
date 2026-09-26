@@ -19,7 +19,7 @@
 <header class="topbar">
   <a class="brand" href="/" title="{{ brand_name }}">
     {% if logo_url %}<img class="brand-logo" src="{{ logo_url }}" alt="">
-    {% elif brand_mark %}<span class="brand-mark">{{ brand_mark }}</span>{% endif %}
+    {% elif brand_mark %}<span class="brand-mark{% if brand_mark_emoji %} is-emoji{% endif %}">{{ brand_mark }}</span>{% endif %}
     <span class="brand-text">{{ brand_name }}</span>
   </a>
   <nav class="nav">

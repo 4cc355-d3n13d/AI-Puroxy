@@ -234,7 +234,10 @@ with TestClient(app) as client:
     client.post("/settings", data={}, files={"logo": ("l.svg", svg, "image/svg+xml")})
     check(config.load()["logo_file"] == "logo.svg" and not (config.BRAND_DIR / "logo.png").exists(),
           "SVG принят, прежний PNG удалён")
-    client.post("/settings", data={"logo_remove": "1"})
+    client.post("/settings", data={"logo_remove": "1", "brand_mark": "🤓"})
+    check('class="brand-mark is-emoji"' in client.get("/models").text,
+          "эмодзи в плашке получает класс is-emoji")
+    client.post("/settings", data={"brand_mark": "M P"})
     check(config.load()["logo_file"] == "" and not list(config.BRAND_DIR.glob("logo.*"))
           and "brand-mark" in client.get("/models").text,
           "удаление логотипа возвращает плашку")

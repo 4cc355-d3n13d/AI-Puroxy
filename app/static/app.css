@@ -100,6 +100,13 @@ a:hover { text-decoration: underline; }
   border-radius: 7px; background: var(--accent); color: var(--on-accent);
   font-size: 11px; font-weight: 700; letter-spacing: .02em;
 }
+/* плашка из эмодзи вместо букв: без фона, крупнее */
+.brand-mark.is-emoji {
+  background: none;
+  font-size: 34px;
+  margin-top: -26px;
+  margin-right: 16px;
+}
 .brand-text { font-size: 14px; }
 .nav { display: flex; gap: 2px; margin-left: 6px; }
 .nav a {
